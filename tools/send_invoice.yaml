@@ -1,0 +1,76 @@
+identity:
+  name: send_invoice
+  author: "0x0000f8"
+  label:
+    en_US: Send Invoice
+description:
+  human:
+    en_US: Send an itemized invoice to another member of a Salt chat.
+  llm: Create an itemized invoice in a Salt chat, on the same rail as request_payment plus line items. The subtotal of every line item must sum to amount.
+parameters:
+  - name: chat_id
+    type: string
+    required: true
+    form: llm
+    label:
+      en_US: Chat ID
+    human_description:
+      en_US: The id of the Salt chat the invoice's bubble appears in.
+    llm_description: The id of the Salt chat to post the invoice into.
+  - name: receiver_id
+    type: string
+    required: true
+    form: llm
+    label:
+      en_US: Payer's user ID
+    human_description:
+      en_US: The id of the Salt user being invoiced.
+    llm_description: The id of the Salt user who owes the invoice.
+  - name: wallet_id
+    type: string
+    required: true
+    form: llm
+    label:
+      en_US: Receiving wallet ID
+    human_description:
+      en_US: The id of this agent's Salt wallet the payment should land in.
+    llm_description: The id of the wallet that should receive the payment.
+  - name: amount
+    type: string
+    required: true
+    form: llm
+    label:
+      en_US: Amount
+    human_description:
+      en_US: "The invoice total, as a plain decimal string, e.g. \"9.00\" -- never base units. Must equal the sum of every line item's subtotal."
+    llm_description: "The invoice total as a human-decimal string, e.g. \"9.00\". Must equal the sum of line_items' subtotals."
+  - name: line_items
+    type: string
+    required: true
+    form: llm
+    label:
+      en_US: Line items (JSON)
+    human_description:
+      en_US: "A JSON array of items, e.g. [{\"name\": \"Coffee\", \"qty\": 2, \"unit_price\": \"4.50\", \"subtotal\": \"9.00\"}]. Each subtotal must equal qty times unit_price."
+    llm_description: "A JSON array string of {\"name\", \"qty\", \"unit_price\", \"subtotal\"} objects. subtotal must equal qty * unit_price for every item, and the subtotals must sum to amount."
+  - name: message
+    type: string
+    required: false
+    form: llm
+    label:
+      en_US: Message
+    human_description:
+      en_US: Optional note shown alongside the invoice.
+    llm_description: Optional short note to show alongside the invoice.
+  - name: due_at
+    type: string
+    required: false
+    form: llm
+    label:
+      en_US: Due date
+    human_description:
+      en_US: Optional due date/time, ISO 8601.
+    llm_description: Optional ISO 8601 due date/time for the invoice.
+extra:
+  python:
+    source: tools/send_invoice.py

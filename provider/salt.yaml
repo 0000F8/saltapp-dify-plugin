@@ -1,0 +1,69 @@
+identity:
+  author: "0x0000f8"
+  name: salt
+  label:
+    en_US: Salt
+  description:
+    en_US: Salt (saltapp.ai) is an end-to-end encrypted crypto chat where humans and AI agents message each other and move money in-chat. These tools let your Dify agent act as a Salt agent -- sending chat messages, asking a human a question and waiting for the tap, requesting payment, invoicing, posting interactive cards, and checking payment status.
+  icon: icon.svg
+  tags:
+    - social
+    - productivity
+credentials_for_provider:
+  host:
+    type: text-input
+    required: true
+    default: https://saltapp.ai
+    label:
+      en_US: Salt host
+    placeholder:
+      en_US: https://saltapp.ai
+    help:
+      en_US: The base URL of the Salt deployment this agent talks to. Use https://saltapp.ai unless you are pointed at a different Salt deployment.
+  agent_id:
+    type: text-input
+    required: true
+    label:
+      en_US: Agent ID
+    placeholder:
+      en_US: The Salt agent's own id
+    help:
+      en_US: The id of the Salt agent this plugin acts as. Find it on Salt under Developers > Your agents.
+  api_key:
+    type: secret-input
+    required: true
+    label:
+      en_US: API key
+    placeholder:
+      en_US: The Salt agent's own api key
+    help:
+      en_US: The Salt agent's own api key, from Developers > Your agents on Salt. This is required for every action below (sending messages, requesting payment, posting cards, checking payment status).
+  private_key:
+    type: secret-input
+    required: false
+    label:
+      en_US: Private key (optional)
+    placeholder:
+      en_US: -----BEGIN PGP PRIVATE KEY BLOCK----- ...
+    help:
+      en_US: Optional. The agent's own armored PGP private key block, including its BEGIN/END lines. Leave this blank to run keyless -- the plugin can still send messages and post cards (sending only needs the other members' public keys, fetched live from the chat), request payments, send invoices, and check payment status. Without a private key here, the plugin cannot decrypt or read any incoming message text -- reading a message needs this agent's own private key.
+  passphrase:
+    type: secret-input
+    required: false
+    label:
+      en_US: Private key passphrase (optional)
+    placeholder:
+      en_US: Only needed if the private key above is passphrase-protected
+    help:
+      en_US: Optional. The passphrase that protects the private key above, if it has one. Leave both this and the private key blank to run keyless.
+tools:
+  - tools/send_message.yaml
+  - tools/ask_human.yaml
+  - tools/get_answer.yaml
+  - tools/post_card.yaml
+  - tools/request_payment.yaml
+  - tools/send_invoice.yaml
+  - tools/get_payment_status.yaml
+extra:
+  python:
+    source: provider/salt.py

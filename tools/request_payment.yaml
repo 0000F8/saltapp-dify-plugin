@@ -1,0 +1,58 @@
+identity:
+  name: request_payment
+  author: "0x0000f8"
+  label:
+    en_US: Request Payment
+description:
+  human:
+    en_US: Request a payment from another member of a Salt chat.
+  llm: Create a payment request in a Salt chat, on Salt's TransferRequest rail. The other member sees a Pay/Decline bubble in the chat.
+parameters:
+  - name: chat_id
+    type: string
+    required: true
+    form: llm
+    label:
+      en_US: Chat ID
+    human_description:
+      en_US: The id of the Salt chat the request's bubble appears in.
+    llm_description: The id of the Salt chat to post the payment request into.
+  - name: receiver_id
+    type: string
+    required: true
+    form: llm
+    label:
+      en_US: Payer's user ID
+    human_description:
+      en_US: The id of the Salt user being asked to pay.
+    llm_description: The id of the Salt user who owes the payment.
+  - name: wallet_id
+    type: string
+    required: true
+    form: llm
+    label:
+      en_US: Receiving wallet ID
+    human_description:
+      en_US: The id of this agent's Salt wallet the payment should land in.
+    llm_description: The id of the wallet that should receive the payment.
+  - name: amount
+    type: string
+    required: true
+    form: llm
+    label:
+      en_US: Amount
+    human_description:
+      en_US: "The amount to request, as a plain decimal string, e.g. \"4.50\" -- never base units."
+    llm_description: "The amount to request as a human-decimal string, e.g. \"4.50\". Never wei/satoshis/base units."
+  - name: message
+    type: string
+    required: false
+    form: llm
+    label:
+      en_US: Message
+    human_description:
+      en_US: Optional note shown alongside the request.
+    llm_description: Optional short note to show alongside the payment request.
+extra:
+  python:
+    source: tools/request_payment.py

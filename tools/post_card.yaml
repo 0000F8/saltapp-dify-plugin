@@ -1,0 +1,40 @@
+identity:
+  name: post_card
+  author: "0x0000f8"
+  label:
+    en_US: Post Card
+description:
+  human:
+    en_US: Post an interactive card into a Salt chat. Fire-and-forget -- unlike Ask Human, this does not wait for a tap.
+  llm: Post an interactive card (a short message with optional buttons) into a Salt chat. Does not wait for a reply or a tap -- use ask_human instead if you need to wait for a human's answer.
+parameters:
+  - name: chat_id
+    type: string
+    required: true
+    form: llm
+    label:
+      en_US: Chat ID
+    human_description:
+      en_US: The id of the Salt chat to post into.
+    llm_description: The id of the Salt chat to post the card into.
+  - name: text
+    type: string
+    required: true
+    form: llm
+    label:
+      en_US: Card text
+    human_description:
+      en_US: The card's message text.
+    llm_description: The text to show on the card.
+  - name: buttons
+    type: string
+    required: false
+    form: llm
+    label:
+      en_US: Buttons
+    human_description:
+      en_US: "Optional. Up to 5 button labels, comma-separated, e.g. \"Approve, Reject\". Leave blank for a plain card with no buttons."
+    llm_description: "Optional comma-separated button labels, at most 5. Leave blank for a plain card with no buttons."
+extra:
+  python:
+    source: tools/post_card.py

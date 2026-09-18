@@ -1,0 +1,22 @@
+identity:
+  name: get_payment_status
+  author: "0x0000f8"
+  label:
+    en_US: Get Payment Status
+description:
+  human:
+    en_US: Check the status of a Salt transfer.
+  llm: Look up a Salt transfer by id and return its current status (e.g. pending, confirmed, failed) and details.
+parameters:
+  - name: transfer_id
+    type: string
+    required: true
+    form: llm
+    label:
+      en_US: Transfer ID
+    human_description:
+      en_US: The id of the Salt transfer to check.
+    llm_description: The id of the transfer to check the status of.
+extra:
+  python:
+    source: tools/get_payment_status.py

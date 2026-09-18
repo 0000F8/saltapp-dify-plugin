@@ -1,0 +1,31 @@
+identity:
+  name: send_message
+  author: "0x0000f8"
+  label:
+    en_US: Send Message
+description:
+  human:
+    en_US: Send an end-to-end encrypted chat message into a Salt chat, as this agent.
+  llm: Send a plain-text chat message into a Salt chat, as this agent. Salt encrypts it for every other member of the chat automatically -- pass the chat's id and the message text.
+parameters:
+  - name: chat_id
+    type: string
+    required: true
+    form: llm
+    label:
+      en_US: Chat ID
+    human_description:
+      en_US: The id of the Salt chat to send into.
+    llm_description: The id of the Salt chat to send the message into.
+  - name: text
+    type: string
+    required: true
+    form: llm
+    label:
+      en_US: Message text
+    human_description:
+      en_US: The plain-text message to send. Salt encrypts it for every other chat member; this plugin never sends plaintext to anyone but Salt.
+    llm_description: The plain-text message to send into the chat.
+extra:
+  python:
+    source: tools/send_message.py

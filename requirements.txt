@@ -1,0 +1,2 @@
+dify_plugin>=0.10.2,<0.11.0
+saltapp @ git+https://github.com/0000F8/saltapp-python@main
