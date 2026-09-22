@@ -1,5 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none">
-  <rect width="64" height="64" rx="8" fill="#2563EB"/>
-  <path d="M32 14 L44 22 V42 L32 50 L20 42 V22 Z" fill="#FFFFFF"/>
-  <path d="M32 14 L44 22 L32 30 L20 22 Z" fill="#93C5FD"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <title>Salt</title>
+  <rect width="64" height="64" fill="#2563EB"/>
+  <g transform="translate(32 32) scale(0.62) translate(-32 -32)">
+  <polygon points="32.00,4.00 47.63,22.24 16.37,22.24" fill="#ffffff"/>
+  <polygon points="14.99,23.84 49.01,23.84 56.00,32.00 32.00,60.00 8.00,32.00" fill="#ffffff"/>
+  </g>
 </svg>

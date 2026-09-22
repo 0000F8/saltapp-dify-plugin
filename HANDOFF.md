@@ -1,5 +1,38 @@
 # HANDOFF
 
+## 2026-09-22 alignment pass (round-4 socket contract, real brand icon, GC)
+
+- **Fixed a real round-3/4 contract violation**: `tools/_salt_common.py`'s
+  `SOCKET_SIGNATURE_TOLERANCE_SECONDS` was still the pre-round-4 widened
+  value (7 days + 1h), matching `saltapp.socket`'s own (still unfixed as of
+  this pass) constant. LANES.md's "fix A" (serve-time signing) means
+  salt-api now re-signs every outbox row fresh at the moment it's actually
+  served, so a row that sat unpolled for the full 7-day retention window
+  verifies with a signature timestamped as if written just now -- the
+  standard ~300s tolerance is correct and sufficient, and the wide one is a
+  real weakness (it would accept a signature far older than any genuine
+  serve-time one could be). Fixed to `300`.
+- **This plugin's own poll loop (`poll_for_answer`) was already correctly
+  aligned**: `POLL_ROUND_TIMEOUT = 2` (already noted "clamps to 0..2s
+  anyway"), 1s between rounds, bounded by a real deadline (max 50s for
+  `ask_human`, 8s for `get_answer`) -- no changes needed there. NOT fixed
+  (out of this repo's scope): `saltapp.client.SaltClient.get_agent_updates`
+  (in the separate `saltapp-python` package this plugin depends on via git)
+  still always sends `after=<cursor>` literally, including `after=0` on a
+  fresh cursor, instead of omitting it so salt-api's server-side ack
+  applies. Flagged to the coordinator; not this repo's file to fix.
+- **Real brand icon**: `_assets/icon.svg` was a hand-drawn approximation
+  (rounded-rect tile, wrong shape); it's now an exact copy of
+  `salt-fe/brand/salt-tile.svg`.
+- **Pending-ask garbage collection** (`gc_stale_pending_asks`, new): a Dify
+  tool plugin has no scheduler of its own, so this runs opportunistically
+  inside `save_pending_ask` -- every time a new ask is saved, any pending-ask
+  file older than 24h (`STALE_ASK_MAX_AGE_SECONDS`) is swept. 5 new tests in
+  `tests/test_pending_ask_gc.py`.
+- 32 -> 37 tests passing (`pytest`, via `.venv`).
+
+---
+
 ## What this is
 
 A brand-new repository (`saltapp-dify-plugin`), built from scratch in

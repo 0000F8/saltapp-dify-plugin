@@ -32,11 +32,19 @@ from saltapp.client import SaltClient
 from saltapp.errors import SaltApiError
 from saltapp.webhook import Event, WebhookVerificationError, handle
 
-# Matches saltapp.socket.SOCKET_SIGNATURE_TOLERANCE_SECONDS: an update row
-# can sit unpolled in the outbox for up to salt-api's retention window (7
-# days) before this plugin ever sees it, so the webhook path's 300s replay
-# tolerance would reject perfectly legitimate rows here.
-SOCKET_SIGNATURE_TOLERANCE_SECONDS = 7 * 24 * 60 * 60 + 60 * 60
+# Round-3/4 socket contract (LANES.md K2, revised 2026-09-18, "fix A" --
+# serve-time signing): salt-api now re-signs every outbox row FRESH, over
+# the stored body, with this agent's CURRENT webhook secret, at the moment
+# it's actually served by GET /api/v1/agent/updates -- never once at
+# enqueue time. So a row that sat unpolled for the full 7-day retention
+# window verifies with a signature timestamped as if written just now, and
+# the STANDARD ~300s tolerance (matching the webhook path) is correct and
+# sufficient here too. A wider tolerance, which this constant used to be
+# (7 days + 1h, matching saltapp.socket's own pre-round-4 value -- see
+# saltapp-python's HANDOFF/FOLLOWUPS for that repo's own pending fix), is
+# no longer needed and is a real weakness: it would accept a signature far
+# older than any genuine serve-time one could be.
+SOCKET_SIGNATURE_TOLERANCE_SECONDS = 300
 
 # ask_human never waits past this, no matter what the caller asks for.
 MAX_ASK_TIMEOUT_SECONDS = 50
@@ -274,6 +282,17 @@ def poll_for_answer(
 # ask that a DIFFERENT process's `ask_human` call created. Mirrors
 # saltapp.socket.default_state_dir's chmod convention (0700 dirs, 0600
 # files) one level under it, at ~/.salt/dify-plugin/asks/.
+#
+# Garbage collection is opportunistic, not a background job -- a Dify tool
+# plugin has no scheduler of its own, so `save_pending_ask` sweeps the
+# directory for stale entries every time it writes a new one (cheap: a
+# directory listing plus one stat() per file, never anywhere outside this
+# one directory). An ask left on disk for over a day is abandoned -- either
+# its workflow crashed before ever calling get_answer, or the human simply
+# never will -- long past ask_human's own MAX_ASK_TIMEOUT_SECONDS (50s), so
+# keeping it forever would just accumulate one file per abandoned ask.
+
+STALE_ASK_MAX_AGE_SECONDS = 24 * 60 * 60
 
 
 def _state_dir() -> Path:
@@ -294,7 +313,39 @@ def _ask_path(ask_id: str) -> Path:
     return _state_dir() / f"{_safe_ask_id(ask_id)}.json"
 
 
+def gc_stale_pending_asks(max_age_seconds: float = STALE_ASK_MAX_AGE_SECONDS, now: float | None = None) -> int:
+    """Deletes every pending-ask file older than `max_age_seconds` (by
+    mtime). Best-effort: a file that vanishes or can't be stat'd/removed
+    between listing and acting on it (another process's own delete_pending_ask
+    racing this) is skipped, not an error. Returns the number removed --
+    tests use this; callers otherwise don't need it."""
+    cutoff = (now if now is not None else time.time()) - max_age_seconds
+    removed = 0
+    try:
+        entries = list(_state_dir().iterdir())
+    except OSError:
+        return 0
+    for path in entries:
+        if not path.name.endswith(".json"):
+            continue  # a stray .tmp from a crashed write, or anything else -- not ours to sweep here
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        if mtime < cutoff:
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
 def save_pending_ask(record: dict[str, Any]) -> None:
+    try:
+        gc_stale_pending_asks()
+    except Exception:  # noqa: BLE001 -- GC must never block saving a real, current ask
+        pass
     path = _ask_path(record["card_id"])
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(record))
