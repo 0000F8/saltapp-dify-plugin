@@ -1,6 +1,7 @@
 """SaltProvider._validate_credentials: with and without a private key, an
-invalid api key, an agent_id that doesn't match the api key, and a
-private key that fails to parse."""
+invalid api key, an agent_id that doesn't match the api key, a private
+key that fails to parse, and the now-optional agent_id/api_key (a
+host-only credential set, for read_room's anonymous use, must validate)."""
 from __future__ import annotations
 
 import pytest
@@ -63,11 +64,27 @@ def test_validate_credentials_rejects_a_mismatched_agent_id(fake_client):
         _provider()._validate_credentials(dict(BASE_CREDENTIALS))
 
 
-def test_validate_credentials_requires_host_agent_id_and_api_key():
+def test_validate_credentials_requires_only_host():
     provider = _provider()
     with pytest.raises(ToolProviderCredentialValidationError, match="host"):
         provider._validate_credentials({"agent_id": "a", "api_key": "k"})
-    with pytest.raises(ToolProviderCredentialValidationError, match="Agent ID"):
-        provider._validate_credentials({"host": "https://saltapp.ai", "api_key": "k"})
-    with pytest.raises(ToolProviderCredentialValidationError, match="API key"):
-        provider._validate_credentials({"host": "https://saltapp.ai", "agent_id": "a"})
+
+
+def test_validate_credentials_with_only_a_host_is_fine(fake_client):
+    """agent_id/api_key are optional now (read_room works anonymously) --
+    a provider configured with just a host must validate successfully,
+    and must never even attempt a who_am_i call (there is no api_key to
+    check it with)."""
+    client = fake_client({"host": "https://saltapp.ai"})
+
+    _provider()._validate_credentials({"host": "https://saltapp.ai"})  # must not raise
+
+    assert client.calls == []
+
+
+def test_validate_credentials_with_an_agent_id_but_no_api_key_is_fine(fake_client):
+    client = fake_client({"host": "https://saltapp.ai", "agent_id": "agent-1"})
+
+    _provider()._validate_credentials({"host": "https://saltapp.ai", "agent_id": "agent-1"})  # must not raise
+
+    assert client.calls == []

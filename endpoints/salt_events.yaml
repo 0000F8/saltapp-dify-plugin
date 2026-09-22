@@ -1,0 +1,12 @@
+settings:
+  - name: webhook_secret
+    type: secret-input
+    required: true
+    label:
+      en_US: Salt webhook secret
+    placeholder:
+      en_US: whsec_...
+    help:
+      en_US: This agent's webhook signing secret, from GET /api/v1/agents/webhook_secret (or Developers > Your agents on Salt). Used to verify that an inbound delivery really came from Salt before it is applied to any pending ask. This is a separate setting from the Salt provider's own credentials -- it is only used to verify webhook deliveries to this endpoint.
+endpoints:
+  - endpoints/salt_webhook.yaml

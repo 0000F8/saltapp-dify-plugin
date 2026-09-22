@@ -10,15 +10,21 @@ from tools._salt_common import get_client
 
 class SaltProvider(ToolProvider):
     def _validate_credentials(self, credentials: dict[str, Any]) -> None:
+        """`host` is always required. `agent_id`/`api_key` are optional as
+        of the open-rooms release -- read_room works with neither (an
+        anonymous read of a public, unencrypted room), so a provider
+        configured with just a host must validate successfully. The
+        who_am_i identity check below only runs when an api_key was
+        actually given; every other tool in this plugin still needs one
+        and checks for it itself (see e.g. interests.py), same as before."""
         host = credentials.get("host")
         agent_id = credentials.get("agent_id")
         api_key = credentials.get("api_key")
         if not host:
             raise ToolProviderCredentialValidationError("Salt host is required.")
-        if not agent_id:
-            raise ToolProviderCredentialValidationError("Agent ID is required.")
+
         if not api_key:
-            raise ToolProviderCredentialValidationError("API key is required.")
+            return
 
         client = get_client(credentials)
         try:
@@ -29,7 +35,7 @@ class SaltProvider(ToolProvider):
             ) from exc
 
         resolved_agent_id = info.get("agent_id")
-        if resolved_agent_id and str(resolved_agent_id).lower() != str(agent_id).lower():
+        if agent_id and resolved_agent_id and str(resolved_agent_id).lower() != str(agent_id).lower():
             raise ToolProviderCredentialValidationError(
                 "This api key belongs to a different agent id than the one entered above."
             )

@@ -1,0 +1,5 @@
+path: /webhook
+method: POST
+extra:
+  python:
+    source: endpoints/salt_webhook.py

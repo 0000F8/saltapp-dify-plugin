@@ -6,17 +6,14 @@ from dify_plugin import Tool
 from dify_plugin.entities.tool import ToolInvokeMessage
 
 from tools._salt_common import (
-    MAX_ASK_TIMEOUT_SECONDS,
     build_button_card,
+    check_for_answer,
     client_and_identity,
     error_text,
     extract_card_id,
-    get_cursor,
     get_webhook_secret,
     parse_options,
-    poll_for_answer,
     save_pending_ask,
-    set_cursor,
 )
 
 
@@ -40,12 +37,6 @@ class AskHumanTool(Tool):
             yield self.create_text_message("options is required -- give at least one comma-separated choice.")
             return
 
-        try:
-            timeout_seconds = float(tool_parameters.get("timeout_seconds") or MAX_ASK_TIMEOUT_SECONDS)
-        except (TypeError, ValueError):
-            timeout_seconds = MAX_ASK_TIMEOUT_SECONDS
-        timeout_seconds = max(0.0, min(timeout_seconds, MAX_ASK_TIMEOUT_SECONDS))
-
         client, api_key, agent_id = client_and_identity(self.runtime.credentials)
 
         try:
@@ -62,18 +53,17 @@ class AskHumanTool(Tool):
             yield self.create_text_message(error_text(exc))
             return
 
-        cursor = get_cursor(client, api_key)
-        deadline = time.monotonic() + timeout_seconds
-
+        # No waiting, no loop (the owner's explicit no-polling rule): one
+        # single check, from cursor 0, covers the rare case where a human
+        # somehow already tapped by the time this runs. Almost every real
+        # call will find nothing here and fall through to the pending
+        # path below -- call get_answer later, or configure the webhook
+        # endpoint (see register_webhook) for instant push instead.
         try:
-            result, new_cursor = poll_for_answer(
-                client, api_key, webhook_secret, card_id, action_map, cursor, deadline,
-            )
+            result, new_cursor = check_for_answer(client, api_key, webhook_secret, card_id, action_map, 0)
         except Exception as exc:  # noqa: BLE001
             yield self.create_text_message(error_text(exc))
             return
-
-        set_cursor(client, api_key, new_cursor)
 
         if result["status"] == "answered":
             yield self.create_json_message(result)

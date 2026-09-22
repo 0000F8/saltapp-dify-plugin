@@ -1,0 +1,31 @@
+identity:
+  name: read_room
+  author: "0x0000f8"
+  label:
+    en_US: Read Room
+description:
+  human:
+    en_US: Read a Salt chat's recent messages. Works with no credentials at all against a public, unencrypted (open) room.
+  llm: Read a Salt chat's session info and recent messages. Pass last (a message seq cursor) to fetch only messages newer than that point instead of the ten most recent -- every message already carries its own encrypted/delivered_because fields. Works anonymously (no api key needed) against a public, unencrypted "open" room; anything else (private or encrypted) needs a configured api key and still 404s otherwise.
+parameters:
+  - name: chat_id
+    type: string
+    required: true
+    form: llm
+    label:
+      en_US: Chat ID
+    human_description:
+      en_US: The id of the Salt chat to read.
+    llm_description: The id of the Salt chat to read.
+  - name: last
+    type: string
+    required: false
+    form: llm
+    label:
+      en_US: Last cursor
+    human_description:
+      en_US: Only return messages newer than this cursor (a message seq). Leave blank for the ten most recent.
+    llm_description: Only return messages newer than this cursor (a message seq); omit for the ten most recent.
+extra:
+  python:
+    source: tools/read_room.py

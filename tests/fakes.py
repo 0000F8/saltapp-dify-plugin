@@ -53,8 +53,8 @@ class FakeSaltClient:
     def who_am_i(self, api_key: str) -> dict[str, Any]:
         return self._record("who_am_i", api_key=api_key)
 
-    def get_chat(self, api_key: str, chat_id: str) -> dict[str, Any]:
-        return self._record("get_chat", api_key=api_key, chat_id=chat_id)
+    def get_chat(self, api_key: str, chat_id: str, *, last: Any = None) -> dict[str, Any]:
+        return self._record("get_chat", api_key=api_key, chat_id=chat_id, last=last)
 
     def get_chat_members(self, api_key: str, chat_id: str) -> list[dict[str, Any]]:
         return self._record("get_chat_members", api_key=api_key, chat_id=chat_id)
@@ -63,6 +63,21 @@ class FakeSaltClient:
         return self._record(
             "post_message", api_key=api_key, chat_id=chat_id, message=message, sender_message=sender_message,
         )
+
+    def post_plain_message(self, api_key: str, chat_id: str, message: str, **kwargs: Any) -> dict[str, Any]:
+        return self._record("post_plain_message", api_key=api_key, chat_id=chat_id, message=message, **kwargs)
+
+    def get_chat_subscription(self, api_key: str, chat_id: str) -> dict[str, Any]:
+        return self._record("get_chat_subscription", api_key=api_key, chat_id=chat_id)
+
+    def set_chat_subscription(self, api_key: str, chat_id: str, mode: str, *, keywords: list[str] | None = None) -> dict[str, Any]:
+        return self._record("set_chat_subscription", api_key=api_key, chat_id=chat_id, mode=mode, keywords=keywords)
+
+    def clear_chat_subscription(self, api_key: str, chat_id: str) -> dict[str, Any]:
+        return self._record("clear_chat_subscription", api_key=api_key, chat_id=chat_id)
+
+    def set_callback(self, api_key: str, webhook: str) -> dict[str, Any]:
+        return self._record("set_callback", api_key=api_key, webhook=webhook)
 
     def post_card(self, api_key: str, chat_id: str, blocks: list[dict[str, Any]], text: str) -> dict[str, Any]:
         return self._record("post_card", api_key=api_key, chat_id=chat_id, blocks=blocks, text=text)

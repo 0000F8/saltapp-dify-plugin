@@ -1,4 +1,3 @@
-import time
 from collections.abc import Generator
 from typing import Any
 
@@ -6,15 +5,13 @@ from dify_plugin import Tool
 from dify_plugin.entities.tool import ToolInvokeMessage
 
 from tools._salt_common import (
-    RESUME_POLL_BUDGET_SECONDS,
+    check_for_answer,
     client_and_identity,
     delete_pending_ask,
     error_text,
     get_webhook_secret,
     load_pending_ask,
-    poll_for_answer,
     save_pending_ask,
-    set_cursor,
 )
 
 
@@ -50,23 +47,35 @@ class GetAnswerTool(Tool):
             })
             return
 
+        # A webhook push (see endpoints/salt_webhook.py) may already have
+        # answered this -- if so, resolve instantly with ZERO Salt calls,
+        # not even who_am_i for the webhook secret.
+        if record.get("status") == "answered":
+            delete_pending_ask(str(ask_id))
+            yield self.create_json_message({
+                "status": "answered",
+                "answer": record.get("answer"),
+                "action_id": record.get("action_id"),
+                "user": record.get("user"),
+            })
+            return
+
+        # No push arrived (or none is configured) -- fall back to exactly
+        # ONE on-demand check, never a loop (the owner's no-polling rule).
         try:
             webhook_secret = get_webhook_secret(client, api_key)
         except Exception as exc:  # noqa: BLE001
             yield self.create_text_message(error_text(exc))
             return
 
-        deadline = time.monotonic() + RESUME_POLL_BUDGET_SECONDS
         try:
-            result, new_cursor = poll_for_answer(
+            result, new_cursor = check_for_answer(
                 client, api_key, webhook_secret,
-                record["card_id"], record.get("action_map") or {}, record.get("cursor", 0), deadline,
+                record["card_id"], record.get("action_map") or {}, record.get("cursor", 0),
             )
         except Exception as exc:  # noqa: BLE001
             yield self.create_text_message(error_text(exc))
             return
-
-        set_cursor(client, api_key, new_cursor)
 
         if result["status"] == "answered":
             delete_pending_ask(str(ask_id))

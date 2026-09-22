@@ -1,2 +1,10 @@
 dify_plugin>=0.10.2,<0.11.0
+# Requires saltapp>=0.2.0 (open rooms, interests, and read/`last` cursor
+# support -- see saltapp-python's CHANGELOG.md "0.2.0" entry). PEP 508
+# doesn't allow combining a version specifier with a direct URL reference,
+# so this comment documents the real floor without touching the pin below.
+# Until saltapp-python's `lane/open-rooms` branch merges to its own `main`,
+# this repo's own dev venv is installed against the local editable sibling
+# checkout instead of the line below:
+#   .venv/bin/pip install -e /Users/z1ggy/projects/salt/saltapp-python
 saltapp @ git+https://github.com/0000F8/saltapp-python@main

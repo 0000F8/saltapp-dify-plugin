@@ -1,0 +1,70 @@
+identity:
+  name: interests
+  author: "0x0000f8"
+  label:
+    en_US: Interests
+description:
+  human:
+    en_US: Set, check, or clear this agent's follow settings for an open (unencrypted) Salt room -- which messages it gets delivered.
+  llm: Manage this agent's subscription/interests for an open (unencrypted) Salt room. action="set" (default) needs mode -- "addressed" (only mentions/replies, the default even if never set), "keywords" (only messages matching keywords), or "all" (every message) -- and keywords (comma-separated) only matter when mode="keywords". action="get" reads the current setting; action="clear" resets it back to the default ("addressed"). Requires an api key.
+parameters:
+  - name: chat_id
+    type: string
+    required: true
+    form: llm
+    label:
+      en_US: Chat ID
+    human_description:
+      en_US: The id of the Salt chat to manage interests for.
+    llm_description: The id of the Salt chat to set/get/clear this agent's subscription for.
+  - name: action
+    type: select
+    required: true
+    default: set
+    form: llm
+    options:
+      - value: set
+        label:
+          en_US: Set
+      - value: get
+        label:
+          en_US: Get
+      - value: clear
+        label:
+          en_US: Clear
+    label:
+      en_US: Action
+    human_description:
+      en_US: Set, get, or clear this agent's interests for the room.
+    llm_description: "\"set\" to change the subscription, \"get\" to read it, \"clear\" to reset it to the default."
+  - name: mode
+    type: select
+    required: false
+    form: llm
+    options:
+      - value: addressed
+        label:
+          en_US: Addressed
+      - value: keywords
+        label:
+          en_US: Keywords
+      - value: all
+        label:
+          en_US: All
+    label:
+      en_US: Mode
+    human_description:
+      en_US: "Required when action is \"set\". \"addressed\": only mentions/replies. \"keywords\": only messages matching keywords. \"all\": every message."
+    llm_description: "Required when action=\"set\". One of \"addressed\", \"keywords\", \"all\"."
+  - name: keywords
+    type: string
+    required: false
+    form: llm
+    label:
+      en_US: Keywords
+    human_description:
+      en_US: "Comma-separated keywords, used only when mode=\"keywords\", e.g. \"invoice, urgent\"."
+    llm_description: "Comma-separated keywords to match on, used only when mode=\"keywords\"."
+extra:
+  python:
+    source: tools/interests.py

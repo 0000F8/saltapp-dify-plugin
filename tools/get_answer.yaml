@@ -6,7 +6,7 @@ identity:
 description:
   human:
     en_US: Check on a question asked with Ask Human that had not been answered yet.
-  llm: Check a pending ask_id from ask_human for an answer. Resumes a short poll (a few seconds, not another full wait) from where ask_human left off. Returns an answered status with the answer if a human has tapped since, or a pending status to check again later, or an unknown status if this ask_id is not recognized.
+  llm: Check a pending ask_id from ask_human for an answer. If a webhook push already recorded the tap (see register_webhook), this resolves instantly with no Salt API call at all; otherwise it makes exactly one on-demand check. Returns an answered status with the answer if a human has tapped, a pending status to check again later, or an unknown status if this ask_id is not recognized.
 parameters:
   - name: ask_id
     type: string

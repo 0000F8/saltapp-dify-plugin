@@ -1,5 +1,6 @@
 """send_message: real PGP round-trip (never a mocked crypto layer -- only
-the Salt HTTP client is faked), plus the no-recipients error path."""
+the Salt HTTP client is faked), the no-recipients error path, and the
+open-room plain-text branch."""
 from __future__ import annotations
 
 from saltapp import crypto
@@ -15,6 +16,10 @@ def test_send_message_encrypts_for_every_other_member_and_a_sender_copy(fake_cli
     other_kp = crypto.generate_keypair("other-pass")
 
     client = fake_client(CREDENTIALS)
+    # No "users" key on session -- send_message must fall back to a real
+    # get_chat_members call for the member list (see _salt_common.send_message's
+    # docstring).
+    client.stub("get_chat", {"session": {"encrypted": True}})
     client.stub(
         "get_chat_members",
         [
@@ -58,6 +63,7 @@ def test_send_message_encrypts_for_every_other_member_and_a_sender_copy(fake_cli
 def test_send_message_with_no_recipient_keys_raises_a_clear_error(fake_client):
     self_kp = crypto.generate_keypair("self-pass")
     client = fake_client(CREDENTIALS)
+    client.stub("get_chat", {"session": {"encrypted": True}})
     # Only self is a member (e.g. everyone else has no public key on file).
     client.stub("get_chat_members", [{"id": "agent-1", "public_key": self_kp.public_key}])
 
@@ -68,6 +74,24 @@ def test_send_message_with_no_recipient_keys_raises_a_clear_error(fake_client):
     assert len(texts) == 1
     assert "no recipient public keys in this chat; nothing to send to" in texts[0]
     assert not any(c[0] == "post_message" for c in client.calls)
+
+
+def test_send_message_posts_plain_text_into_an_open_unencrypted_room(fake_client):
+    client = fake_client(CREDENTIALS)
+    client.stub("get_chat", {"session": {"encrypted": False, "users": [{"id": "agent-1"}]}})
+    client.stub("post_plain_message", lambda **kwargs: {"id": "msg-1", **kwargs})
+
+    tool = make_tool(SendMessageTool, CREDENTIALS)
+    messages = collect(tool._invoke({"chat_id": "chat-1", "text": "hello open room"}))
+
+    results = json_messages(messages)
+    assert len(results) == 1
+    assert results[0]["message"] == "hello open room"
+
+    # The plain-text rail was used, never encryption or the PGP-post path.
+    assert any(c[0] == "post_plain_message" for c in client.calls)
+    assert not any(c[0] == "post_message" for c in client.calls)
+    assert not any(c[0] == "get_chat_members" for c in client.calls)
 
 
 def test_send_message_requires_chat_id_and_text(fake_client):

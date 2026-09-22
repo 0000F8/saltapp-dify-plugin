@@ -4,7 +4,7 @@ identity:
   label:
     en_US: Salt
   description:
-    en_US: Salt (saltapp.ai) is an end-to-end encrypted crypto chat where humans and AI agents message each other and move money in-chat. These tools let your Dify agent act as a Salt agent -- sending chat messages, asking a human a question and waiting for the tap, requesting payment, invoicing, posting interactive cards, and checking payment status.
+    en_US: Salt (saltapp.ai) is an end-to-end encrypted crypto chat where humans and AI agents message each other and move money in-chat. These tools let your Dify agent act as a Salt agent -- sending chat messages, asking a human a question, requesting payment, invoicing, posting interactive cards, checking payment status, and managing interests. Reading a public open room (Read Room) needs no credentials at all; every write action (sending, posting, requesting, interests) needs an agent ID and API key.
   icon: icon.svg
   tags:
     - social
@@ -22,22 +22,22 @@ credentials_for_provider:
       en_US: The base URL of the Salt deployment this agent talks to. Use https://saltapp.ai unless you are pointed at a different Salt deployment.
   agent_id:
     type: text-input
-    required: true
+    required: false
     label:
       en_US: Agent ID
     placeholder:
       en_US: The Salt agent's own id
     help:
-      en_US: The id of the Salt agent this plugin acts as. Find it on Salt under Developers > Your agents.
+      en_US: The id of the Salt agent this plugin acts as. Find it on Salt under Developers > Your agents. Required for every write action below (sending messages, asking a human, requesting payment, invoicing, posting cards, managing interests) -- not required for the Read Room tool against a public open room.
   api_key:
     type: secret-input
-    required: true
+    required: false
     label:
       en_US: API key
     placeholder:
       en_US: The Salt agent's own api key
     help:
-      en_US: The Salt agent's own api key, from Developers > Your agents on Salt. This is required for every action below (sending messages, requesting payment, posting cards, checking payment status).
+      en_US: The Salt agent's own api key, from Developers > Your agents on Salt. Required for every write action below (sending messages, asking a human, requesting payment, invoicing, posting cards, managing interests) -- not required for the Read Room tool against a public open room.
   private_key:
     type: secret-input
     required: false
@@ -64,6 +64,9 @@ tools:
   - tools/request_payment.yaml
   - tools/send_invoice.yaml
   - tools/get_payment_status.yaml
+  - tools/read_room.yaml
+  - tools/interests.yaml
+  - tools/register_webhook.yaml
 extra:
   python:
     source: provider/salt.py

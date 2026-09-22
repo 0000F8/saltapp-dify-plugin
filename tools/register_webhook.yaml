@@ -1,0 +1,22 @@
+identity:
+  name: register_webhook
+  author: "0x0000f8"
+  label:
+    en_US: Register Webhook
+description:
+  human:
+    en_US: Point this agent's Salt webhook at this Dify plugin's own Endpoints URL, so a human's tap on an Ask Human card pushes the answer here instantly.
+  llm: Set this agent's Salt webhook callback to the given URL. Call this once, with the URL Dify shows on this plugin's Endpoints tab after install, so get_answer can resolve instantly (no Salt API call) instead of only checking on demand. Requires an api key.
+parameters:
+  - name: webhook_url
+    type: string
+    required: true
+    form: llm
+    label:
+      en_US: Webhook URL
+    human_description:
+      en_US: "The URL Dify shows on this plugin's Endpoints tab, e.g. https://<dify-host>/e/<hook-id>/webhook."
+    llm_description: "The full URL of this plugin's registered webhook endpoint (from Dify's Endpoints tab), e.g. https://<dify-host>/e/<hook-id>/webhook."
+extra:
+  python:
+    source: tools/register_webhook.py
