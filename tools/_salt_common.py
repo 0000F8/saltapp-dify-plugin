@@ -5,18 +5,25 @@ every `tools/*.py` file would otherwise duplicate actually lives:
 
 - SaltClient construction and caching per host (`get_client`).
 - `who_am_i` webhook-secret resolution and caching (`get_webhook_secret`).
-- `send_message`'s "resolve recipients, encrypt, post" sequence.
-- The ask/poll loop shared by `ask_human` and `get_answer`
-  (`poll_for_answer`), plus the file-based pending-ask store it and
-  `get_answer` read and write.
+- `send_message`'s "resolve recipients, encrypt, post" sequence, now
+  branching to a plain-text post for an open (unencrypted) room.
+- `read_room`, the anonymous-capable wrapper around `get_chat` the
+  `read_room` tool uses.
+- The single-shot answer check shared by `ask_human` and `get_answer`
+  (`check_for_answer`), plus the file-based pending-ask store both tools
+  (and the webhook endpoint's `apply_pushed_card_interaction`) read and
+  write.
 - Small parameter parsers (`parse_options`, `parse_line_items`) for the
   Dify tool parameters that carry more than one plain scalar.
 
-See AGENTS.md for why this is one shared module rather than six copies of
-the same logic, and for the one deliberate simplification versus
-`saltapp.socket.SocketClient` (no per-row "secret not available yet"
-transient case -- this plugin resolves and caches the webhook secret
-before a poll loop ever starts).
+See AGENTS.md for why this is one shared module rather than several
+copies of the same logic, and for why there is no client-side poll loop
+anywhere in this plugin (the owner's explicit no-polling rule for
+stateless Dify tool calls): `check_for_answer` makes exactly one
+`GET /api/v1/agent/updates` call and returns, never retries or sleeps.
+Push delivery (a human's tap arriving instantly, without another tool
+call) goes through `endpoints/salt_webhook.py`'s verified webhook, not
+through polling harder.
 """
 from __future__ import annotations
 
@@ -46,19 +53,17 @@ from saltapp.webhook import Event, WebhookVerificationError, handle
 # older than any genuine serve-time one could be.
 SOCKET_SIGNATURE_TOLERANCE_SECONDS = 300
 
-# ask_human never waits past this, no matter what the caller asks for.
-MAX_ASK_TIMEOUT_SECONDS = 50
-# get_answer is a "check now" call, not another full wait -- a short,
-# bounded number of quick rounds.
-RESUME_POLL_BUDGET_SECONDS = 8
-
-POLL_ROUND_TIMEOUT = 2  # GET /api/v1/agent/updates clamps this to 0..2s anyway
-POLL_ROUND_SLEEP_SECONDS = 1.0
+# check_for_answer's one and only GET /api/v1/agent/updates call per
+# invocation uses this as the server-side hold (salt-api clamps it to
+# 0..2s regardless) -- NOT a client-side retry budget. There is no
+# ask_human/get_answer deadline or retry budget any more: see this
+# module's docstring and AGENTS.md for why a single check, never a loop,
+# is the whole design now.
+POLL_ROUND_TIMEOUT = 2
 
 _lock = threading.Lock()
 _client_cache: dict[str, SaltClient] = {}
 _webhook_secret_cache: dict[str, str] = {}
-_cursor_cache: dict[str, int] = {}
 
 
 def _cache_key(host: str, api_key: str) -> str:
@@ -86,10 +91,16 @@ def client_and_identity(credentials: dict[str, Any]) -> tuple[SaltClient, str, s
     """The three things almost every tool needs: a client, this agent's own
     api key, and this agent's own id (both straight from credentials --
     there is no server round trip to resolve identity, since the provider
-    form already asked for agent_id directly)."""
+    form already asked for agent_id directly). `agent_id`/`api_key` are now
+    optional provider credentials (read_room works with neither), so this
+    reads them with `.get(...) or ""` rather than `credentials[...]` --
+    a blank/missing value becomes `""`, never a KeyError. A tool that
+    genuinely needs a real api key (everything except read_room) is
+    responsible for checking it itself and giving a clear message, same as
+    `interests.py` does."""
     client = get_client(credentials)
-    api_key = str(credentials["api_key"])
-    agent_id = str(credentials["agent_id"])
+    api_key = str(credentials.get("api_key") or "")
+    agent_id = str(credentials.get("agent_id") or "")
     return client, api_key, agent_id
 
 
@@ -114,18 +125,21 @@ def get_webhook_secret(client: SaltClient, api_key: str) -> str:
     return secret
 
 
-def get_cursor(client: SaltClient, api_key: str) -> int:
-    """The socket-mode cursor this identity last polled up to. 0 the first
-    time `ask_human` is ever called for this (host, api_key) -- see this
-    module's docstring and AGENTS.md for why starting from 0 once, rather
-    than on every ask, is the deliberate trade-off here."""
-    with _lock:
-        return _cursor_cache.get(_cache_key(client.host, api_key), 0)
+# -- read_room -----------------------------------------------------------------
 
 
-def set_cursor(client: SaltClient, api_key: str, cursor: int) -> None:
-    with _lock:
-        _cursor_cache[_cache_key(client.host, api_key)] = cursor
+def read_room(client: SaltClient, api_key: str, chat_id: str, last: Any = None) -> dict[str, Any]:
+    """Thin wrapper around `SaltClient.get_chat` for the `read_room` tool.
+    `api_key or ""` means a blank/missing credential sends NO api-key
+    header at all (see `SaltClient._request`'s own docstring) -- enough to
+    read a `public && !encrypted` "open" room anonymously (no PGP
+    recipient list, no per-viewer membership state); anything else with a
+    blank api_key still 404s, indistinguishably, on purpose. Every message
+    in the response's `messages` array already carries its own
+    `encrypted`/`delivered_because` fields verbatim from salt-api -- this
+    plugin never needs to compute or branch on them itself, just pass the
+    response through."""
+    return client.get_chat(api_key or "", chat_id, last=last)
 
 
 # -- send_message -------------------------------------------------------------
@@ -135,11 +149,28 @@ def send_message(client: SaltClient, api_key: str, agent_id: str, chat_id: str, 
     """`saltapp.client.SaltClient.send_message`'s convenience wrapper needs
     an `Identity` (with its own `public_key`), which this plugin doesn't
     have as a credential -- so this re-implements the same sequence
-    directly: fetch the chat's current members, encrypt for every member
-    but self, and (best-effort) encrypt a copy for self too so this
-    agent's own history stays legible if it happens to be a member with a
-    known public key."""
-    members = client.get_chat_members(api_key, chat_id)
+    directly: fetch the chat's current session, and either post plain text
+    (an open/unencrypted room) or encrypt for every member but self and
+    (best-effort) also encrypt a copy for self so this agent's own history
+    stays legible if it happens to be a member with a known public key.
+
+    **Member source.** The chat's own `get_chat` response already carries
+    every member under `session.users` (see `SaltClient.get_chat_members`,
+    which just reads that same key) -- this function reads it straight off
+    the `chat` it already fetched to decide encrypted-vs-plain, saving a
+    second round trip, and falls back to a real `get_chat_members` call
+    only on the rare response that has a `session` but no `users` key
+    (`session` itself is always present on a real chat; a missing `users`
+    would be unusual, not the common case, but cheap to guard against)."""
+    chat = client.get_chat(api_key, chat_id)
+    session = chat.get("session") or {}
+
+    if not session.get("encrypted", True):
+        return client.post_plain_message(api_key, chat_id, text)
+
+    members = session.get("users")
+    if members is None:
+        members = client.get_chat_members(api_key, chat_id)
     self_id = agent_id.lower()
     recipient_keys: list[str] = []
     self_public_key: str | None = None
@@ -195,18 +226,27 @@ def extract_card_id(response: dict[str, Any]) -> str:
     return str(card_id)
 
 
-# -- ask/poll -----------------------------------------------------------------
+# -- ask/answer (single-shot, no polling) -------------------------------------
+#
+# The owner's explicit rule: a Dify tool call is one stateless HTTP round
+# trip, never a client-side while/for + time.sleep() retry loop. Everything
+# below makes exactly one `GET /api/v1/agent/updates` call per invocation
+# and returns -- `POLL_ROUND_TIMEOUT` is a short SERVER-side hold on that
+# one request (salt-api clamps it to 0..2s), not a client retry budget.
+# Instant delivery now comes from `endpoints/salt_webhook.py`'s verified
+# push (`apply_pushed_card_interaction`, below), which writes the same
+# pending-ask file this on-demand check reads.
 
 
 def _verify_row(row: dict[str, Any], webhook_secret: str) -> Event | None:
     """Verify + parse one `GET /api/v1/agent/updates` row. Returns None on
     ANY verification failure -- at this call site the secret itself is
-    already known-good (resolved by `get_webhook_secret` before the poll
-    loop starts), so every failure here is a definitive rejection (bad
-    signature, malformed header, a timestamp genuinely outside the wide
-    socket-mode tolerance), never the "secret not available yet" transient
-    case `saltapp.socket.SocketClient` also has to handle. See this
-    module's docstring."""
+    already known-good (resolved by `get_webhook_secret` before
+    `check_for_answer` is ever called), so every failure here is a
+    definitive rejection (bad signature, malformed header, a timestamp
+    genuinely outside the socket-mode tolerance), never the "secret not
+    available yet" transient case `saltapp.socket.SocketClient` also has
+    to handle. See this module's docstring."""
     raw_body = row.get("body")
     payload = raw_body if isinstance(raw_body, str) else json.dumps(raw_body or {})
     try:
@@ -221,58 +261,57 @@ def _verify_row(row: dict[str, Any], webhook_secret: str) -> Event | None:
         return None
 
 
-def poll_for_answer(
+def check_for_answer(
     client: SaltClient,
     api_key: str,
     webhook_secret: str,
     card_id: str,
     action_map: dict[str, str],
     cursor: int,
-    deadline: float,
 ) -> tuple[dict[str, Any], int]:
-    """The one poll loop behind both `ask_human`'s initial wait and
-    `get_answer`'s resume. Short-polls `GET /api/v1/agent/updates` from
-    `cursor` until either a human's tap on `card_id` arrives or
-    `deadline` (a `time.monotonic()` instant) passes.
+    """The one check behind both `ask_human`'s initial look and
+    `get_answer`'s on-demand fallback. Exactly ONE
+    `GET /api/v1/agent/updates` call from `cursor` -- no retry, no sleep,
+    no deadline. Returns `({"status": "answered", ...}, new_cursor)` the
+    moment a verified human tap on `card_id` is found among the rows this
+    one call returned, or `({"status": "pending"}, new_cursor)` if none
+    was -- the caller decides what to do next (ask_human persists a
+    pending-ask record; get_answer does the same and returns pending).
 
     A tap from an agent (`user.account_type == "Agent"`) is never treated
     as an answer -- only a human's tap resolves a pending ask. Every row
-    advances the cursor once handled, whether it matched, was skipped, or
-    failed verification (see `_verify_row`'s docstring for why there is no
-    "halt without advancing" case here).
+    this one call saw advances the cursor, whether it matched, was
+    skipped, or failed verification (see `_verify_row`'s docstring for why
+    there is no "halt without advancing" case here).
     """
-    while True:
-        response = client.get_agent_updates(api_key, after=cursor, timeout=POLL_ROUND_TIMEOUT, limit=100)
-        updates = response.get("updates") or []
-        for row in updates:
-            row_id = row.get("id")
-            if row_id is not None:
-                cursor = row_id
-            event = _verify_row(row, webhook_secret)
-            if event is None or event.type != "card_interaction":
-                continue
-            if event.body.get("card_id") != card_id:
-                continue
-            user = event.body.get("user") or {}
-            if str(user.get("account_type")) == "Agent":
-                continue  # an agent's tap never resolves a pending human ask
-            action_id = event.body.get("action_id")
-            answered = {
-                "status": "answered",
-                "answer": action_map.get(str(action_id), action_id),
-                "action_id": action_id,
-                "user": user,
-            }
-            return answered, cursor
+    response = client.get_agent_updates(api_key, after=cursor, timeout=POLL_ROUND_TIMEOUT, limit=100)
+    updates = response.get("updates") or []
+    for row in updates:
+        row_id = row.get("id")
+        if row_id is not None:
+            cursor = row_id
+        event = _verify_row(row, webhook_secret)
+        if event is None or event.type != "card_interaction":
+            continue
+        if event.body.get("card_id") != card_id:
+            continue
+        user = event.body.get("user") or {}
+        if str(user.get("account_type")) == "Agent":
+            continue  # an agent's tap never resolves a pending human ask
+        action_id = event.body.get("action_id")
+        answered = {
+            "status": "answered",
+            "answer": action_map.get(str(action_id), action_id),
+            "action_id": action_id,
+            "user": user,
+        }
+        return answered, cursor
 
-        server_cursor = response.get("cursor")
-        if isinstance(server_cursor, int) and server_cursor > cursor:
-            cursor = server_cursor
+    server_cursor = response.get("cursor")
+    if isinstance(server_cursor, int) and server_cursor > cursor:
+        cursor = server_cursor
 
-        if time.monotonic() >= deadline:
-            return {"status": "pending"}, cursor
-
-        time.sleep(max(0.0, min(POLL_ROUND_SLEEP_SECONDS, deadline - time.monotonic())))
+    return {"status": "pending"}, cursor
 
 
 # -- pending-ask file store ---------------------------------------------------
@@ -373,6 +412,46 @@ def delete_pending_ask(ask_id: str) -> None:
         _ask_path(ask_id).unlink()
     except FileNotFoundError:
         pass
+
+
+def apply_pushed_card_interaction(body: dict[str, Any]) -> bool:
+    """What makes push real: `endpoints/salt_webhook.py` calls this with a
+    verified `card_interaction` event's body, and this writes to the exact
+    same on-disk record `check_for_answer`'s on-demand path reads --
+    there are not two answer stores, just two ways of reaching one.
+
+    Looks up `body["card_id"]` in the pending-ask store. If a record is
+    found, still pending (its `status` isn't already `"answered"` -- a
+    guard against Salt redelivering the same webhook, see the workspace
+    note on `X-Salt-Delivery-Id`; `get_answer` deletes the file the moment
+    it reads an answered one, so this is normally a fast no-op, not a
+    common case), and the tapper isn't an agent (the same rule
+    `check_for_answer` applies -- only a human's tap counts), marks it
+    `"answered"` in place with `answer`/`action_id`/`user` (via
+    `save_pending_ask`) and returns True.
+
+    Returns False for anything else -- no `card_id`, an unrelated card
+    this process never asked about, an ask that's already answered, or an
+    agent's own tap. None of those are errors; the webhook endpoint
+    returns 200 regardless, since an event for a card this process
+    doesn't know about is not a failure."""
+    card_id = body.get("card_id")
+    if not card_id:
+        return False
+    record = load_pending_ask(str(card_id))
+    if record is None or record.get("status") == "answered":
+        return False
+    user = body.get("user") or {}
+    if str(user.get("account_type")) == "Agent":
+        return False
+    action_id = body.get("action_id")
+    action_map = record.get("action_map") or {}
+    record["status"] = "answered"
+    record["answer"] = action_map.get(str(action_id), action_id)
+    record["action_id"] = action_id
+    record["user"] = user
+    save_pending_ask(record)
+    return True
 
 
 # -- parameter parsing ---------------------------------------------------------

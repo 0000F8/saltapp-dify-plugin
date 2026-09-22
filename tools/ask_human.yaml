@@ -5,8 +5,8 @@ identity:
     en_US: Ask Human
 description:
   human:
-    en_US: Ask a human a multiple-choice question in a Salt chat and wait (up to 50 seconds) for a tap on one of the buttons.
-  llm: Ask a human a question in a Salt chat with a small set of button options, and wait for them to tap one. Posts a card with the question and one button per option, then waits up to timeout_seconds (max 50) for a human (never an agent) to tap a button. If nobody answers in time, returns a pending status with an ask_id -- check it later with get_answer.
+    en_US: Ask a human a multiple-choice question in a Salt chat. Posts the card and returns immediately with an ask_id -- it does not wait for the tap.
+  llm: Ask a human a question in a Salt chat with a small set of button options. Posts a card with one button per option and returns right away with an ask_id (or, rarely, an immediate answer if one was already there) -- it never waits. Call get_answer with the ask_id later to see if a human (never an agent) has tapped a button, or configure the webhook endpoint once (see register_webhook) so get_answer resolves instantly without another check.
 parameters:
   - name: chat_id
     type: string
@@ -35,16 +35,6 @@ parameters:
     human_description:
       en_US: "Up to 5 answers, comma-separated, e.g. \"Yes, No\" -- one button per option."
     llm_description: "The button choices to offer, comma-separated, at most 5, e.g. \"Yes, No\" or \"staging, production\"."
-  - name: timeout_seconds
-    type: number
-    required: false
-    default: 50
-    form: llm
-    label:
-      en_US: Timeout (seconds)
-    human_description:
-      en_US: How long to wait for a tap before giving up, up to 50 seconds.
-    llm_description: Seconds to wait for a human's tap before returning a pending status. Capped at 50 regardless of what is passed.
 extra:
   python:
     source: tools/ask_human.py

@@ -1,5 +1,173 @@
 # HANDOFF
 
+## 2026-09-22 open rooms, interests, no-polling push (lane/open-rooms)
+
+Branch `lane/open-rooms`. Builds against `saltapp-python`'s own
+`lane/open-rooms` branch (version 0.2.0 -- open rooms, interests, and
+`get_chat`'s `last=` catch-up cursor; see that repo's `CHANGELOG.md`
+"0.2.0" entry). Three things, per the task coordinator's spec:
+
+**1. Open rooms.** `send_message` now branches on the chat's
+`session.encrypted`: an open (`encrypted: false`) room gets a plain-text
+`post_plain_message` call instead of PGP encrypt-and-post; the member
+list, when needed, is read straight off `session.users` (falling back to
+a real `get_chat_members` call only if that key is missing), saving a
+round trip. `request_payment`/`send_invoice`/`post_card` were checked
+against `saltapp-python/src/saltapp/client.py` and confirmed to have no
+`encrypted` branching at all (they ride separate, never-PGP rails) --
+left unchanged, as specified. New `read_room` tool: a thin wrapper around
+`get_chat` that works with a blank/missing `api_key` (sends no api-key
+header at all, per `SaltClient._request`'s own docstring), enough to read
+a `public && !encrypted` room anonymously.
+
+**2. Interests.** New `interests` tool: `action` set/get/clear against
+`GET`/`PUT`/`DELETE /api/v1/chats/:id/subscription`; `mode` is required
+only when `action="set"` (validated in code -- Dify's classic schema has
+no conditional-required), `keywords` only matters when `mode="keywords"`.
+
+**3. No polling, ever -- replaced with a real Dify Endpoint.** The
+owner's explicit rule via the task coordinator: *"DO NOT USE POLLING as a
+mechanic EVER... they must never loop or sleep. Receiving is by webhook...
+otherwise reads are ON DEMAND with a cursor."* `poll_for_answer`'s
+`while True` + `time.sleep()` loop is gone. `ask_human` now posts the
+card, makes exactly ONE `check_for_answer` check (covers the rare
+already-answered-instantly case), and otherwise returns pending
+immediately -- `timeout_seconds` is removed from the tool entirely, there
+is nothing left to wait for. `get_answer` makes at most one on-demand
+check too. Instant delivery instead comes from a real Dify Endpoint,
+`endpoints/salt_webhook.py` (`endpoints/salt_events.yaml` declares its
+own `webhook_secret` settings form, separate from the tool provider's
+credentials; `manifest.yaml` wires `plugins.endpoints` and
+`resource.permission.endpoint.enabled`): it verifies each inbound
+`card_interaction` delivery and calls the new
+`apply_pushed_card_interaction`, which writes `status: "answered"`
+straight into the SAME on-disk pending-ask file `check_for_answer`'s
+on-demand path reads. New `register_webhook` tool is the one-time setup
+(`client.set_callback`) that points an agent's Salt webhook at that
+endpoint's URL. Once registered, `get_answer` resolves a tap **instantly,
+with zero Salt API calls** by checking `record["status"] == "answered"`
+before ever touching the network; without it, `get_answer` still works
+purely on-demand.
+
+**Other changes**: `agent_id`/`api_key` are now optional provider
+credentials (`read_room` needs neither); `SaltProvider._validate_credentials`
+only runs the `who_am_i` identity check when an `api_key` was actually
+given, so a host-only provider validates. `tools/_salt_common.py`'s
+`client_and_identity` reads credentials with `.get(...) or ""` instead of
+`credentials[...]`, so a blank/missing `agent_id`/`api_key` never raises
+a `KeyError`; every tool that genuinely needs a real `api_key`
+(`interests`, `register_webhook`) checks for it itself and gives a plain
+"An API key is required..." message rather than letting a blank key 401
+opaquely. The now-unused module-level socket cursor cache
+(`get_cursor`/`set_cursor`/`_cursor_cache`) was removed along with the
+poll loop it existed to support -- each pending-ask file carries its own
+cursor instead. `manifest.yaml` bumped `0.0.1` -> `0.1.0` (first real
+feature release beyond the initial scaffold).
+
+**Files added**: `tools/read_room.py`/`.yaml`, `tools/interests.py`/
+`.yaml`, `tools/register_webhook.py`/`.yaml`, `endpoints/salt_events.yaml`,
+`endpoints/salt_webhook.yaml`, `endpoints/salt_webhook.py`,
+`tests/test_read_room.py`, `tests/test_interests.py`,
+`tests/test_register_webhook.py`, `tests/test_webhook_endpoint.py`.
+
+**Files changed**: `requirements.txt` (documents the `saltapp>=0.2.0`
+floor in a comment -- PEP 508 forbids combining a version specifier with
+a direct URL reference, so the pin itself is untouched), `provider/salt.py`,
+`provider/salt.yaml`, `manifest.yaml`, `tools/_salt_common.py` (send_message's
+open-room branch, `read_room`, `check_for_answer` replacing
+`poll_for_answer`, `apply_pushed_card_interaction`, `client_and_identity`
+hardening, cursor-cache removal), `tools/ask_human.py`/`.yaml` (no more
+`timeout_seconds`, one-shot check), `tools/get_answer.py`/`.yaml`
+(pushed-answer shortcut, one-shot fallback), `tests/fakes.py`
+(`FakeSaltClient` gained `get_chat(last=)`, `post_plain_message`,
+`get_chat_subscription`/`set_chat_subscription`/`clear_chat_subscription`,
+`set_callback`), `tests/conftest.py` (cursor-cache cleanup removed),
+`tests/test_ask_human.py`/`test_get_answer.py` (rewritten for the
+one-shot/push semantics, asserting exact `get_agent_updates` call counts
+to prove there's no loop), `tests/test_send_message.py` (open-room case
+added), `tests/test_provider.py` (host-only credentials case added),
+`README.md`, `AGENTS.md`.
+
+**Tests**: 37 -> 60 passing (`.venv/bin/python -m pytest -q`):
+
+```
+$ .venv/bin/python -m pytest -q
+............................................................             [100%]
+60 passed, 19 warnings in 1.3s
+```
+
+**No-polling grep, confirmed**: `grep -rn "sleep" tools/ endpoints/` finds
+only docstring/comment prose explaining the absence of a loop (e.g. "never
+retries or sleeps") -- zero actual `time.sleep()`/`asyncio.sleep()` calls
+and zero `while`/`for`-based retry loops anywhere in `tools/` or
+`endpoints/`.
+
+**Deviations from the spec, and why**:
+- The spec's `ask_human` rewrite said "then ALWAYS save the pending-ask
+  record and return pending (or the answered shape if that one-shot
+  happened to match)" -- read literally this could mean persisting a
+  pending-ask file even on an instant answer. That was NOT done: an
+  instantly-answered ask returns and is never saved, matching the
+  original design (`get_answer` deletes a pending file the moment it
+  sees "answered", so a file that starts "answered" would just be
+  immediately-stale). Interpreted "ALWAYS" as describing the now-dominant
+  case (the one-shot rarely matches, so the pending path is what
+  "always" happens now), not as a literal instruction to persist
+  redundant answered-and-done state.
+- `check_for_answer`'s guard in `apply_pushed_card_interaction` against
+  `record.get("status") == "answered"` (skip re-applying a push to an
+  already-answered record) wasn't explicitly asked for, but was added as
+  a small idempotency guard against Salt redelivering the same webhook
+  (the workspace's own note on `X-Salt-Delivery-Id` retries) -- without
+  it, a redelivered `card_interaction` for an already-resolved ask would
+  silently overwrite `answer`/`user` with (in practice identical, but not
+  guaranteed) data a second time.
+- Removed `get_cursor`/`set_cursor`/`_cursor_cache` entirely rather than
+  leaving them as unused dead code -- the spec's deletion list didn't
+  name them, but nothing calls them after the rewrite (ask_human no
+  longer starts from a cached module-level cursor; each pending-ask file
+  carries its own cursor instead), and `AGENTS.md`'s "Known limitations"
+  bullet about them would have gone stale if they'd stayed.
+- `read_room.yaml`'s `last` parameter is typed `string`, not `number`:
+  matches every other id-like parameter in this plugin (`chat_id`,
+  `ask_id`, `transfer_id`) and avoids any float-vs-int coercion risk on a
+  cursor value passed straight into a query string.
+
+**Left undone / blocked** (same standing gaps as before, none newly
+introduced by this pass): no live run against a real salt-api or a real
+Dify instance (so the webhook endpoint has never received an actual
+delivery from Salt, only a synthetic signed request in
+`test_webhook_endpoint.py`); pending-ask files still rely on
+`save_pending_ask`'s opportunistic GC, not a real scheduler; this
+plugin's source still has no public repository. The "UAT steps" section
+further down this file is from the PREVIOUS pass and still mostly
+applies (steps 1-4, 6-8), except step 5's "tap within 50 seconds" no
+longer describes `ask_human`'s behavior -- it returns immediately now.
+Additional steps for this pass's new tools, to run after step 4 above:
+
+9. Add `read_room` with the `chat_id` of a real public, unencrypted
+   ("open") Salt room and NO api key configured on the provider (a
+   second, host-only credential set, or temporarily blank the api key on
+   the existing one) -- confirm it returns the room's recent messages
+   with no 401/403.
+10. Add `interests` with `action="set"`, `mode="keywords"`,
+    `keywords="urgent, invoice"` against an open room this agent is a
+    member of -- confirm `get_chat_subscription` (via `action="get"`)
+    reflects it; then `action="clear"` and confirm it reverts to
+    `"addressed"`.
+11. After installing this plugin build into a real Dify instance, open
+    its Endpoints tab, copy the shown URL, fill in the endpoint group's
+    own `webhook_secret` setting (from `GET /api/v1/agents/webhook_secret`
+    or Developers > Your agents on Salt -- note this is a SEPARATE
+    settings form from the Salt tool provider's credentials), then call
+    `register_webhook(webhook_url="<that URL>")`. Run `ask_human` again,
+    tap the button in the Salt app, and confirm a SUBSEQUENT `get_answer`
+    call resolves instantly (check CloudWatch/local logs, if reachable,
+    to confirm no `GET /api/v1/agent/updates` call was made for that
+    specific `get_answer` invocation).
+
+---
+
 ## 2026-09-22 alignment pass (round-4 socket contract, real brand icon, GC)
 
 - **Fixed a real round-3/4 contract violation**: `tools/_salt_common.py`'s

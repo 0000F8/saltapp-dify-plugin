@@ -2,10 +2,10 @@
 
 Two things every test needs, regardless of which tool it exercises:
 
-1. `tools._salt_common`'s module-level caches (client, webhook secret,
-   socket cursor) must be reset between tests -- otherwise a client
-   configured with one test's stubs would leak into the next test that
-   happens to use the same host string.
+1. `tools._salt_common`'s module-level caches (client, webhook secret)
+   must be reset between tests -- otherwise a client configured with one
+   test's stubs would leak into the next test that happens to use the
+   same host string.
 2. The pending-ask file store must NEVER touch the real `~/.salt/...` on
    this machine -- `_state_dir()` is monkeypatched to a pytest `tmp_path`
    for every test, whether or not that particular test exercises
@@ -29,7 +29,6 @@ from tools import _salt_common  # noqa: E402
 def _isolate_salt_common_state(tmp_path, monkeypatch):
     _salt_common._client_cache.clear()
     _salt_common._webhook_secret_cache.clear()
-    _salt_common._cursor_cache.clear()
 
     state_dir = tmp_path / "salt-dify-plugin-asks"
 
@@ -39,15 +38,10 @@ def _isolate_salt_common_state(tmp_path, monkeypatch):
 
     monkeypatch.setattr(_salt_common, "_state_dir", _fake_state_dir)
 
-    # Real polling logic, just without a real 1s pause between rounds --
-    # keeps a multi-round poll test fast without changing what it proves.
-    monkeypatch.setattr(_salt_common, "POLL_ROUND_SLEEP_SECONDS", 0.01)
-
     yield
 
     _salt_common._client_cache.clear()
     _salt_common._webhook_secret_cache.clear()
-    _salt_common._cursor_cache.clear()
 
 
 @pytest.fixture
