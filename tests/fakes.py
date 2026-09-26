@@ -18,11 +18,15 @@ own real implementations.
 """
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import parse_qs, unquote, urlparse
 
 from dify_plugin.entities.invoke_message import InvokeMessage
 from dify_plugin.entities.tool import ToolInvokeMessage
+
+_CARD_PATH_RE = re.compile(r"^/api/v1/cards/([^/?]+)$")
 
 
 class FakeSaltClient:
@@ -94,8 +98,19 @@ class FakeSaltClient:
     def get_transfer(self, api_key: str, transfer_id: str) -> dict[str, Any]:
         return self._record("get_transfer", api_key=api_key, transfer_id=transfer_id)
 
-    def get_agent_updates(self, api_key: str, *, after: int = 0, timeout: int = 2, limit: int = 100) -> dict[str, Any]:
-        return self._record("get_agent_updates", api_key=api_key, after=after, timeout=timeout, limit=limit)
+    def _request(self, method: str, path: str, api_key: str, json_body: Any = None, **kwargs: Any) -> Any:
+        """The real `SaltClient` has no public `get_card` method (see
+        `tools/_salt_common.py::get_card`'s docstring), so that's the one
+        thing this plugin calls `_request` for -- parse the card id/`after`
+        straight out of the path so a test can stub/assert on them exactly
+        like every other named method here (`.stub("get_card", ...)`,
+        `c[1]["after"]`), rather than the raw path string."""
+        match = _CARD_PATH_RE.match(urlparse(path).path)
+        if method == "GET" and match:
+            card_id = unquote(match.group(1))
+            after = parse_qs(urlparse(path).query).get("after", [None])[0]
+            return self._record("get_card", api_key=api_key, card_id=card_id, after=after)
+        raise AssertionError(f"FakeSaltClient._request: unhandled {method} {path}")
 
 
 def make_tool(tool_cls: type, credentials: dict[str, Any]):

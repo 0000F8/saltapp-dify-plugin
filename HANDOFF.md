@@ -1,5 +1,177 @@
 # HANDOFF
 
+## 2026-09-26 ask_human/get_answer poll the card, not the shared agent outbox (lane/card-poll)
+
+Branch `lane/card-poll`. Cross-repo bug: this plugin's `ask_human`/
+`get_answer` waited for a human's answer by reading the agent's
+socket-mode outbox (`GET /api/v1/agent/updates` -- see
+`_salt_common.py::check_for_answer`, as it stood before this pass). That
+outbox keeps exactly ONE forward-only cursor PER AGENT server-side
+(`after=0` is the same as omitting it entirely; a lower `after` is
+silently ignored). A stateless tool call polling it therefore (a) races
+every other consumer of that same agent's deliveries -- two concurrent
+`ask_human`/`get_answer` checks (or an ask running beside a real
+socket-mode client on the same agent) could each advance the SAME cursor
+and silently steal each other's rows, stranding one of them pending
+forever -- and (b) any `after=` this plugin sent advanced the agent's
+server-side ack for good, for every OTHER consumer of that agent's
+outbox too. Identical fix landed the same day in salt-mcp
+(`getCard`/`pollForCardInteraction`) and saltapp-agentkit
+(`ask_poll.py`); this plugin was the third and last of the three.
+
+**The fix.** `check_for_answer` now reads `GET /api/v1/cards/:id`
+instead (new `tools/_salt_common.py::get_card`) -- one card's own
+interaction log, scoped to that card alone, idempotent, sharing no state
+with any other ask. `saltapp.client.SaltClient` has no public `get_card`
+method as of this writing (confirmed against `saltapp-python` main,
+0.3.2) -- `get_card` goes through `client._request(...)`, the same
+underlying method every public `SaltClient` call is already built on,
+mirroring saltapp-agentkit's identical choice (see that repo's
+`ask_poll.py::_get_card` docstring) rather than editing a sibling package
+this repo doesn't own. The design otherwise stayed exactly what it was
+(single on-demand check, no retry loop, file-based pending-ask store for
+cross-worker-process visibility and webhook push) -- only WHAT
+`check_for_answer` reads changed, not the shape of the fix around it;
+see "Deviation from the task spec" below for why this plugin did NOT
+also move to a fully self-contained `ask_id` token the way the other two
+references did.
+
+Concurrency claim, now true: this plugin polls its own card; nothing is
+shared; unlimited concurrent asks per agent (each `ask_human`/`get_answer`
+call reads and advances only its own card's own interaction cursor).
+
+**A second, independent bug found and fixed along the way**:
+`extract_card_id` read `response.get("id") or response.get("card_id")`
+-- but a real `POST /api/v1/cards` response (salt-api 0.96.1,
+`Api::V1::CardsController#create`) has NO top-level `id` at all, only
+`message_id` (the chat bubble) and `resource_id`/`resource.id` (the
+card itself). This plugin's own test fakes had stubbed a fictional
+`{"id": "card-123"}` shape from day one, which is exactly how the bug
+went unnoticed -- the same bug the task coordinator flagged as present
+in saltapp-agentkit's mocks too. Fixed `extract_card_id` to read
+`resource_id`/`resource.id`, and every test fake now models the real
+response shape (`{message_id, resource_id, resource: {id, ...}}`).
+
+**Human-vs-agent filtering, without the outbox's free `user` object.**
+`GET /api/v1/cards/:id`'s interaction rows carry only `{id, user_id,
+action_id, value, created_at}` (plus `transfer_request_id`/`_status` on
+a "pay" tap; see `CardInteraction#as_json_for_owner`) -- never a full
+`user` object or `account_type`, unlike the old outbox event body
+(`CardInteractionJob#perform`'s payload). This plugin's `ask_human` asks
+in a CHAT, not of one named human (no `to`/`human_id` parameter, unlike
+salt-mcp's `askHuman`/saltapp-agentkit's `salt_ask_human` -- a
+deliberate, pre-existing difference in this plugin's own contract, left
+untouched), so telling a human's tap from an agent's needs the whole
+chat's member list, not one comparison. New `tools/_salt_common.py::humans_by_id`/
+`get_chat_members_map`: `ask_human` fetches the chat's members ONCE (one
+new `get_chat` call it didn't make before) and persists the resulting
+`humans` map (non-agent members only, keyed by lowercased id) in the
+pending-ask record alongside `action_map`, so `get_answer`'s one
+on-demand check never needs a second chat read -- it stays exactly one
+`GET /api/v1/cards/:id` call, per the owner's no-polling rule.
+
+**429 handling**, newly explicit: a rate limit on the one-shot check
+(`SaltApiError` with `status == 429`) is never retried and never
+surfaced as a hard tool error in `ask_human`/`get_answer` -- new
+`_salt_common.py::pending_with_retry_hint` turns it into an ordinary
+`{"status": "pending", "ask_id": ..., "retry_after_seconds": N, "hint":
+"..."}` result (only when Salt sent a `Retry-After`), so a caller waits
+and tries `get_answer` again instead of being told the ask failed.
+`ask_human` still persists the pending-ask record on a 429 (the card was
+already posted -- losing the `ask_id` here would strand it).
+
+**Deviation from the task spec.** The task's `ask_id` shape
+(`{v, chat_id, card_id, message_id, human_id, options/actionMap, after}`,
+self-contained, no server-side state) matches salt-mcp/saltapp-agentkit,
+which have no push feature and no reason to persist anything between
+calls. This plugin's `ask_id` stayed `card_id`, backed by the existing
+on-disk pending-ask file (`~/.salt/dify-plugin/asks/<card_id>.json`), on
+purpose: this plugin's whole "Push vs. on-demand" design (see README.md)
+depends on `endpoints/salt_webhook.py` being able to write a REAL
+webhook's answer into a record `get_answer` can find later, from a
+DIFFERENT worker process, without that process having seen the original
+`ask_human` call at all -- a self-contained token `ask_human` alone knows
+about cannot receive an update from an event that arrives afterward, in
+a different process, addressed only by card id. The bug being fixed (a
+SHARED per-agent cursor) is orthogonal to this: the per-card file's own
+`cursor` field was never shared across asks either, before or after this
+fix -- what made the OLD design unsafe was the RESOURCE it pointed the
+cursor at (the shared outbox), not where the cursor value itself lived.
+Redirecting `check_for_answer` at `GET /api/v1/cards/:id` (scoped to one
+card) removes the actual hazard while keeping the file store, which
+remains load-bearing for push. Flagged here explicitly rather than
+silently narrowing the task.
+
+**Files changed**: `tools/_salt_common.py` (module docstring; removed
+`get_webhook_secret`/`_webhook_secret_cache`/`_cache_key`/`_verify_row`/
+`SOCKET_SIGNATURE_TOLERANCE_SECONDS`/`POLL_ROUND_TIMEOUT` and the
+`saltapp.webhook` import entirely; added `get_card`, `humans_by_id`,
+`get_chat_members_map`, `pending_with_retry_hint`; rewrote
+`check_for_answer`'s signature and body; fixed `extract_card_id`),
+`tools/ask_human.py` (fetches `humans`, no more `get_webhook_secret`,
+429 handling), `tools/get_answer.py` (same), `tests/fakes.py`
+(`FakeSaltClient._request` replaces `get_agent_updates`; parses
+`get_card`'s path/`after`), `tests/conftest.py` (`_webhook_secret_cache`
+cleanup removed), `tests/test_ask_human.py`/`test_get_answer.py`
+(rewritten for card reads; real `post_card`/`get_chat` response shapes;
+new 429 tests), `tests/test_webhook_endpoint.py` (docstring only --
+this test itself needed no changes, since real webhook delivery never
+touched the outbox), README.md, AGENTS.md.
+
+**Files added**: `tests/test_check_for_answer.py` (direct unit tests of
+`check_for_answer`/`get_card`: tap answered, an agent's tap ignored, a
+human's tap resolves even with an agent's tap ahead of it in the same
+check, an unrelated action_id ignored, `after` threaded through, a
+garbage `after` still answers per salt-api's fail-open contract, a pay
+tap's `transfer_request_id`/`_status` ride along, a 429 propagates with
+`retry_after` intact, and a `hasattr` check pinning that `FakeSaltClient`
+has no `get_agent_updates` method at all any more), `tests/test_salt_common_cards.py`
+(`extract_card_id`'s real-shape parsing and its former bug reproduced
+against the real shape; `humans_by_id`/`get_chat_members_map`).
+
+**Files removed**: `tests/webhook_helpers.py` (`signed_update_row` built
+socket-mode outbox rows' HMAC signature; nothing reads the outbox any
+more, so nothing called it -- `test_webhook_endpoint.py` has its own
+local signing helper for a real webhook POST body and never depended on
+this file).
+
+**Tests**: 60 -> 80 passing (`.venv/bin/python -m pytest -q`):
+
+```
+$ .venv/bin/python -m pytest -q
+................................................................................ [100%]
+80 passed, 19 warnings in 1.06s
+```
+
+(Confirmed the 60-passing baseline by `git stash`-ing the tracked
+changes and re-running with only the new, untracked test files present:
+17 failures from the new tests against the OLD `_salt_common.py` -- i.e.
+the new tests genuinely exercise the fix, not just the surface area --
+plus the original 60 passing.)
+
+**No-outbox grep, confirmed**:
+
+```
+$ grep -rn "agent/updates" tools/ endpoints/
+tools/_salt_common.py:28:/api/v1/agent/updates` (the socket-mode outbox) at all.** That outbox
+tools/_salt_common.py:264:# THIS NO LONGER READS `GET /api/v1/agent/updates` (the socket-mode
+tools/_salt_common.py:282:    Replaces the old outbox poll (`GET /api/v1/agent/updates`): that
+```
+
+Every hit is a comment explaining the removal; zero functional reads.
+There was never a standalone "read my deliveries" tool in this plugin to
+remove or warn on -- `get_agent_updates` was called from exactly one
+place (`check_for_answer`), never exposed as its own Dify tool.
+
+**Left undone / out of scope**: no live run against a real salt-api (same
+standing gap as every prior pass); the pre-existing "Pending-ask files
+are never garbage-collected" bullet in `AGENTS.md`'s "Known limitations"
+is stale (a GC pass shipped in the 2026-09-22 alignment pass, see that
+entry below) but fixing that unrelated doc drift was out of scope for
+this pass and is left for whoever touches that section next. Did not
+push this branch (per the task's instructions) and did not touch any
+other repo.
+
 ## 2026-09-22 open rooms, interests, no-polling push (lane/open-rooms)
 
 Branch `lane/open-rooms`. Builds against `saltapp-python`'s own

@@ -4,7 +4,6 @@ Not a Dify entity itself -- just the one place the business logic that
 every `tools/*.py` file would otherwise duplicate actually lives:
 
 - SaltClient construction and caching per host (`get_client`).
-- `who_am_i` webhook-secret resolution and caching (`get_webhook_secret`).
 - `send_message`'s "resolve recipients, encrypt, post" sequence, now
   branching to a plain-text post for an open (unencrypted) room.
 - `read_room`, the anonymous-capable wrapper around `get_chat` the
@@ -19,11 +18,28 @@ every `tools/*.py` file would otherwise duplicate actually lives:
 See AGENTS.md for why this is one shared module rather than several
 copies of the same logic, and for why there is no client-side poll loop
 anywhere in this plugin (the owner's explicit no-polling rule for
-stateless Dify tool calls): `check_for_answer` makes exactly one
-`GET /api/v1/agent/updates` call and returns, never retries or sleeps.
-Push delivery (a human's tap arriving instantly, without another tool
-call) goes through `endpoints/salt_webhook.py`'s verified webhook, not
-through polling harder.
+stateless Dify tool calls): `check_for_answer` makes exactly one Salt API
+call and returns, never retries or sleeps. Push delivery (a human's tap
+arriving instantly, without another tool call) goes through
+`endpoints/salt_webhook.py`'s verified webhook, not through polling
+harder.
+
+**2026-09-26: `check_for_answer` no longer reads `GET
+/api/v1/agent/updates` (the socket-mode outbox) at all.** That outbox
+keeps exactly ONE forward-only cursor PER AGENT on the server (`after=0`
+is the same as omitting it; a lower `after` is silently ignored). A
+stateless tool call that polls it therefore races every other consumer of
+that same agent's deliveries: two concurrent `ask_human`/`get_answer`
+checks -- or an ask running beside anything else reading that agent's
+outbox (a real socket-mode client, another pending ask) -- could each
+advance the SAME cursor and silently steal each other's rows, stranding
+one of them forever. `check_for_answer` now reads `GET
+/api/v1/cards/:id` instead (`get_card`, below): one card's own
+interaction log, scoped to that card alone. Reading a card by id is
+idempotent and shares no state with any other ask, this agent's other
+checks, or any other consumer of this agent's outbox -- see `get_card`'s
+docstring. Mirrors the identical fix in salt-mcp's `getCard`/
+`pollForCardInteraction` and saltapp-agentkit's `ask_poll.py`.
 """
 from __future__ import annotations
 
@@ -33,41 +49,14 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from saltapp import cards, crypto
 from saltapp.client import SaltClient
 from saltapp.errors import SaltApiError
-from saltapp.webhook import Event, WebhookVerificationError, handle
-
-# Round-3/4 socket contract (LANES.md K2, revised 2026-09-18, "fix A" --
-# serve-time signing): salt-api now re-signs every outbox row FRESH, over
-# the stored body, with this agent's CURRENT webhook secret, at the moment
-# it's actually served by GET /api/v1/agent/updates -- never once at
-# enqueue time. So a row that sat unpolled for the full 7-day retention
-# window verifies with a signature timestamped as if written just now, and
-# the STANDARD ~300s tolerance (matching the webhook path) is correct and
-# sufficient here too. A wider tolerance, which this constant used to be
-# (7 days + 1h, matching saltapp.socket's own pre-round-4 value -- see
-# saltapp-python's HANDOFF/FOLLOWUPS for that repo's own pending fix), is
-# no longer needed and is a real weakness: it would accept a signature far
-# older than any genuine serve-time one could be.
-SOCKET_SIGNATURE_TOLERANCE_SECONDS = 300
-
-# check_for_answer's one and only GET /api/v1/agent/updates call per
-# invocation uses this as the server-side hold (salt-api clamps it to
-# 0..2s regardless) -- NOT a client-side retry budget. There is no
-# ask_human/get_answer deadline or retry budget any more: see this
-# module's docstring and AGENTS.md for why a single check, never a loop,
-# is the whole design now.
-POLL_ROUND_TIMEOUT = 2
 
 _lock = threading.Lock()
 _client_cache: dict[str, SaltClient] = {}
-_webhook_secret_cache: dict[str, str] = {}
-
-
-def _cache_key(host: str, api_key: str) -> str:
-    return f"{host.rstrip('/')}::{api_key}"
 
 
 # -- client / identity -------------------------------------------------------
@@ -102,27 +91,6 @@ def client_and_identity(credentials: dict[str, Any]) -> tuple[SaltClient, str, s
     api_key = str(credentials.get("api_key") or "")
     agent_id = str(credentials.get("agent_id") or "")
     return client, api_key, agent_id
-
-
-def get_webhook_secret(client: SaltClient, api_key: str) -> str:
-    """`who_am_i`'s `webhook_secret`, cached per (host, api_key) so
-    `ask_human`/`get_answer` don't call it on every single invocation."""
-    key = _cache_key(client.host, api_key)
-    with _lock:
-        cached = _webhook_secret_cache.get(key)
-    if cached:
-        return cached
-    info = client.who_am_i(api_key)
-    secret = info.get("webhook_secret")
-    if not secret:
-        raise SaltApiError(
-            "GET", f"{client.host}/api/v1/agents/webhook_secret", 0,
-            {"error": "who_am_i returned no webhook_secret for this api key"},
-        )
-    secret = str(secret)
-    with _lock:
-        _webhook_secret_cache[key] = secret
-    return secret
 
 
 # -- read_room -----------------------------------------------------------------
@@ -200,6 +168,53 @@ def send_message(client: SaltClient, api_key: str, agent_id: str, chat_id: str, 
     return client.post_message(api_key, chat_id, encrypted, sender_message)
 
 
+def humans_by_id(members: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Builds `check_for_answer`'s `humans` map: every non-agent member of
+    `members` (a chat's `session.users`, or a `get_chat_members` call),
+    keyed by lowercased id, holding just enough of that member's public
+    info to answer `ask_human`/`get_answer`'s response shape with (`id`,
+    `username`, `display_name`, `account_type`).
+
+    This exists because `GET /api/v1/cards/:id`'s own interaction log
+    (see `get_card`, below) carries only `user_id` per tap -- never a
+    full user object or `account_type` -- unlike the old socket-mode
+    outbox event body, which carried the tapper's whole `user` dict for
+    free. Resolving "is this tapper a human" therefore needs the chat's
+    member list; computed ONCE, at `ask_human` time, and persisted in
+    the pending-ask record so `get_answer`'s one on-demand check never
+    needs a second chat read to tell a human's tap from an agent's (see
+    `check_for_answer`'s docstring)."""
+    result: dict[str, dict[str, Any]] = {}
+    for member in members:
+        if str(member.get("account_type")) == "Agent":
+            continue  # an agent's tap never resolves a pending human ask
+        member_id = str(member.get("id", "")).lower()
+        if not member_id:
+            continue
+        result[member_id] = {
+            "id": member.get("id"),
+            "username": member.get("username"),
+            "display_name": member.get("display_name"),
+            "account_type": member.get("account_type"),
+        }
+    return result
+
+
+def get_chat_members_map(client: SaltClient, api_key: str, chat_id: str) -> dict[str, dict[str, Any]]:
+    """Fetches `chat_id`'s member list -- mirroring `send_message`'s own
+    `session.users`-first, `get_chat_members`-fallback read -- and
+    returns `check_for_answer`'s `humans` map (`humans_by_id`, above).
+    Called once, at `ask_human` time; `get_answer` reuses the persisted
+    result rather than repeating this call (see `humans_by_id`'s
+    docstring)."""
+    chat = client.get_chat(api_key, chat_id)
+    session = chat.get("session") or {}
+    members = session.get("users")
+    if members is None:
+        members = client.get_chat_members(api_key, chat_id)
+    return humans_by_id(members or [])
+
+
 # -- cards --------------------------------------------------------------------
 
 
@@ -220,9 +235,20 @@ def build_button_card(text: str, button_labels: list[str], action_prefix: str) -
 
 
 def extract_card_id(response: dict[str, Any]) -> str:
-    card_id = response.get("id") or response.get("card_id")
+    """`POST /api/v1/cards`'s response (salt-api 0.96.1,
+    `Api::V1::CardsController#create`) has NO top-level `id` -- the
+    card's own id comes back as `resource_id` (and, redundantly,
+    `resource.id`); `message_id` is the bubble's own id, a different
+    thing. A 2026-09-26 review found this function reading `response.get
+    ("id")`, which is always None on a real response (only this
+    plugin's own test fakes ever stubbed a top-level `id`, hiding the
+    bug) -- fixed here, and the fakes now model the real shape too."""
+    card_id = response.get("resource_id") or (response.get("resource") or {}).get("id")
     if not card_id:
-        raise SaltApiError("POST", "/api/v1/cards", 0, {"error": "card response carried no id/card_id"})
+        raise SaltApiError(
+            "POST", "/api/v1/cards", 0,
+            {"error": "card response carried no resource_id/resource.id"},
+        )
     return str(card_id)
 
 
@@ -230,88 +256,123 @@ def extract_card_id(response: dict[str, Any]) -> str:
 #
 # The owner's explicit rule: a Dify tool call is one stateless HTTP round
 # trip, never a client-side while/for + time.sleep() retry loop. Everything
-# below makes exactly one `GET /api/v1/agent/updates` call per invocation
-# and returns -- `POLL_ROUND_TIMEOUT` is a short SERVER-side hold on that
-# one request (salt-api clamps it to 0..2s), not a client retry budget.
-# Instant delivery now comes from `endpoints/salt_webhook.py`'s verified
-# push (`apply_pushed_card_interaction`, below), which writes the same
+# below makes exactly one Salt API call per invocation and returns. Instant
+# delivery comes from `endpoints/salt_webhook.py`'s verified push
+# (`apply_pushed_card_interaction`, below), which writes the same
 # pending-ask file this on-demand check reads.
+#
+# THIS NO LONGER READS `GET /api/v1/agent/updates` (the socket-mode
+# outbox) -- see this module's docstring for why that was a bug (one
+# forward-only cursor per agent, shared across every concurrent ask and
+# every other consumer of that agent's deliveries) and `get_card`'s
+# docstring, immediately below, for the replacement.
 
 
-def _verify_row(row: dict[str, Any], webhook_secret: str) -> Event | None:
-    """Verify + parse one `GET /api/v1/agent/updates` row. Returns None on
-    ANY verification failure -- at this call site the secret itself is
-    already known-good (resolved by `get_webhook_secret` before
-    `check_for_answer` is ever called), so every failure here is a
-    definitive rejection (bad signature, malformed header, a timestamp
-    genuinely outside the socket-mode tolerance), never the "secret not
-    available yet" transient case `saltapp.socket.SocketClient` also has
-    to handle. See this module's docstring."""
-    raw_body = row.get("body")
-    payload = raw_body if isinstance(raw_body, str) else json.dumps(raw_body or {})
-    try:
-        return handle(
-            row.get("headers") or {},
-            payload,
-            secret=webhook_secret,
-            verify=True,
-            tolerance_seconds=SOCKET_SIGNATURE_TOLERANCE_SECONDS,
-        )
-    except WebhookVerificationError:
-        return None
+def get_card(client: SaltClient, api_key: str, card_id: str, after: Any = None) -> dict[str, Any]:
+    """`GET /api/v1/cards/:id` (salt-api 0.96.1) -- one card's own
+    interaction log, scoped to that card alone: owner-only (a bearer
+    whose agent doesn't own the card 404s, indistinguishably from an
+    unknown id). `interactions` comes back newest first, capped at 50
+    server-side; `after` (an interaction id, or an ISO8601 timestamp)
+    asks for only interactions strictly newer than that, and an
+    unrecognised value fails OPEN server-side (the full list, never a
+    500) -- this never needs to validate its own cursor before sending
+    it.
+
+    Replaces the old outbox poll (`GET /api/v1/agent/updates`): that
+    outbox keeps exactly ONE forward-only cursor PER AGENT, so two
+    concurrent asks for the same agent -- or an ask running beside any
+    other consumer of that agent's deliveries -- could each advance the
+    SAME cursor and silently steal each other's rows. Reading one card by
+    id is idempotent and shares no state with any other ask. Mirrors
+    salt-mcp's `getCard` and saltapp-agentkit's `ask_poll.py::_get_card`.
+
+    `saltapp.client.SaltClient` has no public `get_card` method as of
+    this writing (confirmed: no `def get_card` anywhere in that package,
+    version 0.3.2) -- this goes through `_request`, the same underlying
+    method every public call on `SaltClient` is already built on, rather
+    than adding one to a sibling package this repo doesn't own."""
+    path = f"/api/v1/cards/{quote(str(card_id), safe='')}"
+    if after is not None and after != "":
+        path += f"?after={quote(str(after), safe='')}"
+    return client._request("GET", path, api_key)  # noqa: SLF001 -- see docstring
 
 
 def check_for_answer(
     client: SaltClient,
     api_key: str,
-    webhook_secret: str,
     card_id: str,
     action_map: dict[str, str],
-    cursor: int,
-) -> tuple[dict[str, Any], int]:
+    humans: dict[str, dict[str, Any]],
+    after: Any,
+) -> tuple[dict[str, Any], Any]:
     """The one check behind both `ask_human`'s initial look and
-    `get_answer`'s on-demand fallback. Exactly ONE
-    `GET /api/v1/agent/updates` call from `cursor` -- no retry, no sleep,
-    no deadline. Returns `({"status": "answered", ...}, new_cursor)` the
-    moment a verified human tap on `card_id` is found among the rows this
-    one call returned, or `({"status": "pending"}, new_cursor)` if none
-    was -- the caller decides what to do next (ask_human persists a
-    pending-ask record; get_answer does the same and returns pending).
+    `get_answer`'s on-demand fallback. Exactly ONE `GET /api/v1/cards/:id`
+    call from `after` -- no retry, no sleep, no deadline. Returns
+    `({"status": "answered", ...}, new_after)` the moment a human's tap on
+    one of `action_map`'s buttons is found among the interactions this one
+    call returned, or `({"status": "pending"}, new_after)` if none was --
+    the caller decides what to do next (`ask_human` persists a pending-ask
+    record; `get_answer` does the same and returns pending).
 
-    A tap from an agent (`user.account_type == "Agent"`) is never treated
-    as an answer -- only a human's tap resolves a pending ask. Every row
-    this one call saw advances the cursor, whether it matched, was
-    skipped, or failed verification (see `_verify_row`'s docstring for why
-    there is no "halt without advancing" case here).
+    `humans` (see `humans_by_id`/`get_chat_members_map`) maps a lowercased
+    member user id to that member's public info -- `GET
+    /api/v1/cards/:id`'s interactions carry only `user_id`, never a full
+    user object or `account_type`, so this is how an agent's tap is told
+    apart from a human's without a second network call: only a `user_id`
+    present in `humans` counts as an answer (an id absent from it -- an
+    agent, or anyone this ask never resolved to a member -- never
+    resolves a pending human ask, mirroring the old outbox check's
+    `account_type == "Agent"` rule). `after` advances to the NEWEST
+    interaction id seen regardless of whether it matched this ask's own
+    buttons or who tapped, so a resumed check (`get_answer`) never re-reads
+    a row it has already looked at and rejected.
     """
-    response = client.get_agent_updates(api_key, after=cursor, timeout=POLL_ROUND_TIMEOUT, limit=100)
-    updates = response.get("updates") or []
-    for row in updates:
-        row_id = row.get("id")
-        if row_id is not None:
-            cursor = row_id
-        event = _verify_row(row, webhook_secret)
-        if event is None or event.type != "card_interaction":
+    response = get_card(client, api_key, card_id, after=after)
+    interactions = response.get("interactions") or []
+    new_after = after
+    if interactions and interactions[0].get("id") is not None:
+        new_after = interactions[0]["id"]
+
+    for interaction in interactions:
+        action_id = interaction.get("action_id")
+        if action_id not in action_map:
             continue
-        if event.body.get("card_id") != card_id:
-            continue
-        user = event.body.get("user") or {}
-        if str(user.get("account_type")) == "Agent":
-            continue  # an agent's tap never resolves a pending human ask
-        action_id = event.body.get("action_id")
-        answered = {
+        user_id = str(interaction.get("user_id") or "").lower()
+        user = humans.get(user_id)
+        if user is None:
+            continue  # an agent's tap (or an unresolved id) never resolves a pending human ask
+        answered: dict[str, Any] = {
             "status": "answered",
             "answer": action_map.get(str(action_id), action_id),
             "action_id": action_id,
             "user": user,
         }
-        return answered, cursor
+        # Rides along only on a "pay" button's tap (never one of
+        # ask_human's own plain option buttons today) -- see
+        # CardInteraction#as_json_for_owner. Threaded through anyway so
+        # the next card type that reuses this poll doesn't need its own
+        # answer-shaping code, mirroring salt-mcp/saltapp-agentkit.
+        if interaction.get("transfer_request_id"):
+            answered["transfer_request_id"] = interaction["transfer_request_id"]
+            answered["transfer_request_status"] = interaction.get("transfer_request_status")
+        return answered, new_after
 
-    server_cursor = response.get("cursor")
-    if isinstance(server_cursor, int) and server_cursor > cursor:
-        cursor = server_cursor
+    return {"status": "pending"}, new_after
 
-    return {"status": "pending"}, cursor
+
+def pending_with_retry_hint(ask_id: str, retry_after: int | None) -> dict[str, Any]:
+    """`ask_human`/`get_answer`'s response when their one on-demand check
+    hits a 429 -- never a loop, never a hard error: this is still a
+    `"pending"` result, just carrying `retry_after_seconds` (from
+    `SaltApiError.retry_after`, Rack::Attack's `Retry-After` header) when
+    Salt sent one, so a caller knows how long to wait before calling
+    `get_answer` again rather than hammering it immediately."""
+    result: dict[str, Any] = {"status": "pending", "ask_id": ask_id}
+    if retry_after:
+        result["retry_after_seconds"] = retry_after
+        result["hint"] = f"Rate limited -- wait about {retry_after}s before calling get_answer again."
+    return result
 
 
 # -- pending-ask file store ---------------------------------------------------

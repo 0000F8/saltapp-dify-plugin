@@ -120,17 +120,58 @@ rather than duplicated, per the same "one place the logic lives"
 reasoning `saltapp.integrations._tools.SaltTools` uses for its six shared
 actions.
 
-**The one deliberate simplification versus `saltapp.socket.SocketClient`.**
-That client has to handle a "secret not available yet" TRANSIENT
-verification failure (halt without advancing the cursor, retry next
-loop) versus a DEFINITIVE rejection (bad signature -- advance past it).
-This plugin resolves and caches the webhook secret via `who_am_i` BEFORE
-`check_for_answer` is ever called (`get_webhook_secret`, cached per
-host+api_key), so by the time a row is being verified, the secret is
-already known-good -- there is no per-row "secret not available yet"
-case to halt on here. Every row's verification is either a success or a
-definitive rejection, and either way the cursor advances past it. See
-`tools/_salt_common.py`'s `_verify_row`/`check_for_answer` docstrings.
+**2026-09-26: `check_for_answer` stopped reading the shared per-agent
+socket-mode outbox.** Until this pass, its one on-demand check was still
+`GET /api/v1/agent/updates` -- the same outbox `saltapp.socket.SocketClient`
+drains, verified via `who_am_i`'s cached webhook secret
+(`get_webhook_secret`) and `saltapp.webhook.handle`. That outbox keeps
+exactly ONE forward-only cursor PER AGENT server-side (`after=0` is the
+same as omitting it; a lower `after` is silently ignored), so two
+concurrent `ask_human`/`get_answer` checks for the same agent -- or an
+ask running beside anything else consuming that agent's deliveries, such
+as a real socket-mode client -- could each advance the SAME cursor and
+silently steal each other's rows, stranding one of them pending forever.
+This is the identical bug class fixed the same day in salt-mcp's
+`getCard`/`pollForCardInteraction` and saltapp-agentkit's `ask_poll.py`.
+
+`check_for_answer` now reads `GET /api/v1/cards/:id` instead
+(`tools/_salt_common.py::get_card`) -- one card's own interaction log,
+scoped to that card alone. Reading a card by id is idempotent and shares
+no state with any other ask, this agent's other checks, or any other
+consumer of this agent's outbox: any number of concurrent
+`ask_human`/`get_answer` calls, for this agent or any other, now each
+resolve their own ask independently. `saltapp.client.SaltClient` has no
+public `get_card` method as of this writing (confirmed against
+`saltapp-python` main, version 0.3.2) -- `get_card` goes through
+`_request`, the same underlying method every public `SaltClient` call is
+already built on, rather than adding one to a sibling package this repo
+doesn't own.
+
+One real consequence: `GET /api/v1/cards/:id`'s interaction rows carry
+only `{id, user_id, action_id, value, created_at}` (plus
+`transfer_request_id`/`_status` on a "pay" tap) -- never a full `user`
+object or `account_type`, unlike the old outbox event body. Telling a
+human's tap from an agent's therefore needs the chat's member list;
+`tools/ask_human.py` fetches it ONCE, at ask time
+(`_salt_common.get_chat_members_map`/`humans_by_id`), and persists the
+resulting `humans` map in the pending-ask record alongside `action_map`,
+so `get_answer`'s one on-demand check never needs a second chat read.
+`get_webhook_secret`, `_verify_row`, and the socket-mode signature
+verification machinery are gone from this on-demand path entirely (a
+`GET /api/v1/cards/:id` call is an ordinary authenticated REST read, not
+a signed webhook envelope needing verification) -- they were used for
+NOTHING else in this plugin, so they were deleted rather than left as
+dead code. The webhook PUSH path (`endpoints/salt_webhook.py`,
+`apply_pushed_card_interaction`) is entirely unaffected: a real webhook
+delivery already carries the full `user` object
+(`CardInteractionJob#perform`'s payload), verified via the endpoint's own
+`settings["webhook_secret"]`, never the outbox.
+
+**429 handling.** A rate limit on the one-shot check is never retried and
+never raised as a hard tool error -- `_salt_common.pending_with_retry_hint`
+turns it into an ordinary `{"status": "pending", "ask_id": ...,
+"retry_after_seconds": N, "hint": "..."}` result, so a caller waits and
+tries `get_answer` again rather than being told the ask failed.
 
 **Cross-identity safety check.** `get_answer` refuses (`"status":
 "unknown"`) a pending record whose saved `host`/`agent_id` don't match
@@ -205,26 +246,30 @@ docstring for why it reads credentials with `.get(...) or ""` rather than
   (cheap, but only prunes on the next call, not proactively) or a
   separate cron-like mechanism Dify plugins don't have a first-class way
   to run. Left undone here; a future pass should add at least the sweep.
-- **The module-level caches (`_client_cache`, `_webhook_secret_cache`)
-  are per-process, not shared across Dify's worker processes**, unlike
-  the pending-ask file store. A `who_am_i` call (and the resulting
-  webhook secret) gets re-resolved once per process rather than truly
-  once per identity -- a minor efficiency loss, not a correctness bug,
-  since `get_webhook_secret` degrades gracefully to "resolve it again"
-  rather than assuming a shared cache hit. (The socket-mode cursor cache
-  this bullet used to also cover, `get_cursor`/`set_cursor`, is gone
-  entirely as of the no-polling redesign -- each `ask_human` call now
-  starts its one check from cursor 0, and each pending ask carries its
-  own cursor in its file, so there is no longer a module-level cursor to
-  worry about being process-local.)
+- **The module-level `_client_cache` is per-process, not shared across
+  Dify's worker processes**, unlike the pending-ask file store. Each
+  process opens its own `SaltClient`/httpx connection pool per host
+  rather than truly sharing one -- a minor efficiency loss, not a
+  correctness bug. (This bullet used to also cover a `_webhook_secret_cache`
+  and, before that, a socket-mode cursor cache `get_cursor`/`set_cursor` --
+  both are gone entirely as of the 2026-09-26 card-polling fix: nothing
+  in this plugin resolves or caches a webhook secret for the on-demand
+  check any more, since `GET /api/v1/cards/:id` is an ordinary
+  authenticated REST read, not a signed envelope needing verification;
+  each pending ask carries its own `after` cursor -- scoped to its own
+  card, never shared -- in its file, so there is no module-level cursor
+  to worry about being process-local either.)
 - **No end-to-end test against a live salt-api, including the new
   webhook endpoint.** Every test in `tests/` mocks
   `saltapp.client.SaltClient` (never a real network call);
   `send_message`'s tests use real PGP round-trip crypto,
-  `ask_human`/`get_answer`'s tests build genuinely HMAC-signed rows and
-  verify them for real, and `test_webhook_endpoint.py` builds a real
-  werkzeug `Request` with a genuinely HMAC-signed body and calls
-  `SaltWebhookEndpoint._invoke` directly -- but nobody has installed this
+  `ask_human`/`get_answer`'s tests assert the exact `GET
+  /api/v1/cards/:id` call count and its `after` cursor
+  (`FakeSaltClient._request`, since the real `SaltClient` has no named
+  `get_card` method to stub -- see `tests/fakes.py`), and
+  `test_webhook_endpoint.py` builds a real werkzeug `Request` with a
+  genuinely HMAC-signed body and calls `SaltWebhookEndpoint._invoke`
+  directly -- but nobody has installed this
   plugin into a real Dify instance, copied its real Endpoints URL into
   `register_webhook`, and watched a real Salt webhook delivery land yet.
   See `HANDOFF.md` for the UAT steps to do that by hand.
@@ -251,15 +296,22 @@ same way `dify-official-plugins/tools/google/tests/test_google.py` does
 runtime session; `response_type`/`runtime` set by hand instead -- see
 `tests/fakes.py::make_tool`), and only fakes `saltapp.client.SaltClient`
 (via `tests/fakes.py::FakeSaltClient`, installed by the `fake_client`
-fixture in `tests/conftest.py`). `tests/test_webhook_endpoint.py` uses the
-same `object.__new__` trick for the real `SaltWebhookEndpoint` (its
-`Endpoint.__init__` is `@final` and needs a live `Session`; `_invoke`
-never touches `self.session`, so this is safe), and builds a real
-werkzeug `Request` via `werkzeug.test.EnvironBuilder`. Crypto
-(`saltapp.crypto`) and webhook signature verification (`saltapp.webhook`)
-are exercised for real in every test that touches them --
-`tests/webhook_helpers.py::signed_update_row` computes a genuine HMAC
-(reused directly by `test_ask_human.py`/`test_get_answer.py`, and its
-signing math is duplicated inline in `test_webhook_endpoint.py` to sign a
-raw HTTP body instead of a socket-mode row), and `test_send_message.py`
-round-trips real PGP keypairs -- neither is ever stubbed.
+fixture in `tests/conftest.py`). Since the real `SaltClient` has no
+public `get_card` method (see `_salt_common.get_card`'s docstring),
+`FakeSaltClient._request` parses the card id/`after` straight out of the
+path it's given so a test can `.stub("get_card", ...)` and assert on
+`c[1]["after"]` exactly like every other named method on the fake; any
+other `_request` call is an `AssertionError`, on purpose (this plugin
+only ever calls `_request` for `get_card`). `tests/test_webhook_endpoint.py`
+uses the same `object.__new__` trick for the real `SaltWebhookEndpoint`
+(its `Endpoint.__init__` is `@final` and needs a live `Session`;
+`_invoke` never touches `self.session`, so this is safe), and builds a
+real werkzeug `Request` via `werkzeug.test.EnvironBuilder` with a
+genuinely HMAC-signed body, verified through `saltapp.webhook`'s real
+signature check -- that machinery now lives ONLY in this one test file
+(and in `endpoints/salt_webhook.py` itself): `ask_human`/`get_answer`'s
+own tests stopped needing it as of the 2026-09-26 card-polling fix, since
+a `GET /api/v1/cards/:id` read is an ordinary authenticated REST call,
+never a signed envelope (the now-removed `tests/webhook_helpers.py::signed_update_row`
+built the old socket-mode row's HMAC; nothing calls it any more).
+`test_send_message.py` round-trips real PGP keypairs -- never stubbed.

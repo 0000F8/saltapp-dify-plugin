@@ -3,14 +3,15 @@ from typing import Any
 
 from dify_plugin import Tool
 from dify_plugin.entities.tool import ToolInvokeMessage
+from saltapp.errors import SaltApiError
 
 from tools._salt_common import (
     check_for_answer,
     client_and_identity,
     delete_pending_ask,
     error_text,
-    get_webhook_secret,
     load_pending_ask,
+    pending_with_retry_hint,
     save_pending_ask,
 )
 
@@ -48,8 +49,7 @@ class GetAnswerTool(Tool):
             return
 
         # A webhook push (see endpoints/salt_webhook.py) may already have
-        # answered this -- if so, resolve instantly with ZERO Salt calls,
-        # not even who_am_i for the webhook secret.
+        # answered this -- if so, resolve instantly with ZERO Salt calls.
         if record.get("status") == "answered":
             delete_pending_ask(str(ask_id))
             yield self.create_json_message({
@@ -61,18 +61,21 @@ class GetAnswerTool(Tool):
             return
 
         # No push arrived (or none is configured) -- fall back to exactly
-        # ONE on-demand check, never a loop (the owner's no-polling rule).
-        try:
-            webhook_secret = get_webhook_secret(client, api_key)
-        except Exception as exc:  # noqa: BLE001
-            yield self.create_text_message(error_text(exc))
-            return
-
+        # ONE on-demand check of this card's own interaction log (never
+        # the shared per-agent socket-mode outbox -- see _salt_common.py's
+        # module docstring), never a loop (the owner's no-polling rule).
         try:
             result, new_cursor = check_for_answer(
-                client, api_key, webhook_secret,
-                record["card_id"], record.get("action_map") or {}, record.get("cursor", 0),
+                client, api_key,
+                record["card_id"], record.get("action_map") or {}, record.get("humans") or {},
+                record.get("cursor"),
             )
+        except SaltApiError as exc:
+            if exc.status == 429:
+                yield self.create_json_message(pending_with_retry_hint(str(ask_id), exc.retry_after))
+                return
+            yield self.create_text_message(error_text(exc))
+            return
         except Exception as exc:  # noqa: BLE001
             yield self.create_text_message(error_text(exc))
             return

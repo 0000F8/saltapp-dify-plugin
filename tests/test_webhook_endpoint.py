@@ -4,12 +4,15 @@ a bad signature never touches the pending-ask store and gets a 401.
 
 Builds a real werkzeug Request the same way Dify's own runtime would
 construct one from a raw HTTP POST (`werkzeug.test.EnvironBuilder`), with
-a genuinely HMAC-signed `X-Salt-Signature` header -- the same signing math
-`tests/webhook_helpers.py::signed_update_row` uses for socket-mode rows,
-since `saltapp.webhook.handle` treats both transports identically (see
-that module's own docstring). `SaltWebhookEndpoint` is constructed the
-same way `tests/fakes.py::make_tool` builds a `Tool`: `Endpoint.__init__`
-is `@final` and needs a live plugin `Session` this test never opens, and
+a genuinely HMAC-signed `X-Salt-Signature` header via `_signed_request`,
+below (the same signing math `saltapp.webhook.handle` verifies for a real
+webhook delivery). This is a REAL webhook POST from salt-api, entirely
+separate from -- and unaffected by -- the 2026-09-26 fix that moved
+`check_for_answer`'s on-demand check off the shared socket-mode outbox
+and onto `GET /api/v1/cards/:id`: push delivery never went through that
+outbox to begin with. `SaltWebhookEndpoint` is constructed the same way
+`tests/fakes.py::make_tool` builds a `Tool`: `Endpoint.__init__` is
+`@final` and needs a live plugin `Session` this test never opens, and
 `_invoke` never touches `self.session`, so `object.__new__` bypasses it
 safely.
 """

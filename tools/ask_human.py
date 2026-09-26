@@ -4,6 +4,7 @@ from typing import Any
 
 from dify_plugin import Tool
 from dify_plugin.entities.tool import ToolInvokeMessage
+from saltapp.errors import SaltApiError
 
 from tools._salt_common import (
     build_button_card,
@@ -11,8 +12,9 @@ from tools._salt_common import (
     client_and_identity,
     error_text,
     extract_card_id,
-    get_webhook_secret,
+    get_chat_members_map,
     parse_options,
+    pending_with_retry_hint,
     save_pending_ask,
 )
 
@@ -48,19 +50,41 @@ class AskHumanTool(Tool):
         try:
             card_response = client.post_card(api_key, str(chat_id), blocks, str(question))
             card_id = extract_card_id(card_response)
-            webhook_secret = get_webhook_secret(client, api_key)
+            # Who in this chat is human, as of right now -- persisted below
+            # so get_answer's one on-demand check never needs a second
+            # chat read to tell a human's tap from an agent's (see
+            # _salt_common.check_for_answer's docstring).
+            humans = get_chat_members_map(client, api_key, str(chat_id))
         except Exception as exc:  # noqa: BLE001
             yield self.create_text_message(error_text(exc))
             return
 
         # No waiting, no loop (the owner's explicit no-polling rule): one
-        # single check, from cursor 0, covers the rare case where a human
-        # somehow already tapped by the time this runs. Almost every real
-        # call will find nothing here and fall through to the pending
-        # path below -- call get_answer later, or configure the webhook
+        # single check of THIS card's own interaction log (never the
+        # shared per-agent socket-mode outbox -- see _salt_common.py's
+        # module docstring) covers the rare case where a human somehow
+        # already tapped by the time this runs. Almost every real call
+        # will find nothing here and fall through to the pending path
+        # below -- call get_answer later, or configure the webhook
         # endpoint (see register_webhook) for instant push instead.
         try:
-            result, new_cursor = check_for_answer(client, api_key, webhook_secret, card_id, action_map, 0)
+            result, new_cursor = check_for_answer(client, api_key, card_id, action_map, humans, None)
+        except SaltApiError as exc:
+            if exc.status == 429:
+                save_pending_ask({
+                    "card_id": card_id,
+                    "chat_id": str(chat_id),
+                    "action_map": action_map,
+                    "humans": humans,
+                    "cursor": None,
+                    "host": client.host,
+                    "agent_id": agent_id,
+                    "created_at": time.time(),
+                })
+                yield self.create_json_message(pending_with_retry_hint(card_id, exc.retry_after))
+                return
+            yield self.create_text_message(error_text(exc))
+            return
         except Exception as exc:  # noqa: BLE001
             yield self.create_text_message(error_text(exc))
             return
@@ -73,6 +97,7 @@ class AskHumanTool(Tool):
             "card_id": card_id,
             "chat_id": str(chat_id),
             "action_map": action_map,
+            "humans": humans,
             "cursor": new_cursor,
             "host": client.host,
             "agent_id": agent_id,

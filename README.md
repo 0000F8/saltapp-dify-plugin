@@ -198,7 +198,11 @@ There are two ways `get_answer` finds out a human actually tapped:
    check against Salt (never a retry loop; this plugin never polls) and
    tells you whether a tap has arrived since the last check. You just
    have to call it again yourself to see a fresh answer, rather than it
-   arriving on its own.
+   arriving on its own. This check reads the question's own card
+   (`GET /api/v1/cards/:id`) -- it polls its own card, nothing shared, so
+   any number of concurrent `ask_human`/`get_answer` calls, for this
+   agent or any other, can each resolve their own ask independently
+   without racing anyone else's (see HANDOFF.md's 2026-09-26 entry).
 
 Both paths write to and read from the exact same pending-ask file
 (`~/.salt/dify-plugin/asks/<card_id>.json`) -- there is no behavioral
@@ -241,10 +245,12 @@ checkout in editable mode instead of the pinned git URL:
 Tests mock `saltapp.client.SaltClient` only -- they never hit a real
 network or a real Salt deployment. `send_message`'s tests use real PGP
 keypairs and a real encrypt/decrypt round trip (via `saltapp.crypto`);
-`ask_human`/`get_answer`'s tests build genuinely HMAC-signed update rows
-and verify them through `saltapp.webhook`'s real signature check;
-`test_webhook_endpoint.py` does the same for a real HTTP request against
-the actual `SaltWebhookEndpoint`.
+`ask_human`/`get_answer`'s tests assert the exact `GET /api/v1/cards/:id`
+call count and its `after` cursor (never the old shared per-agent
+socket-mode outbox -- see HANDOFF.md's 2026-09-26 entry);
+`test_webhook_endpoint.py` builds a real HTTP request with a genuinely
+HMAC-signed body and verifies it through `saltapp.webhook`'s real
+signature check against the actual `SaltWebhookEndpoint`.
 
 To debug against a real Dify instance: `cp .env.example .env`, fill in
 `REMOTE_INSTALL_URL`/`REMOTE_INSTALL_KEY` from Dify's plugin debugging
