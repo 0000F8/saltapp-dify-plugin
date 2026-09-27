@@ -4,7 +4,12 @@ Notes for whoever maintains this plugin next.
 
 ## What this is
 
-A Dify Tool plugin exposing ten of Salt's agent actions (`send_message`,
+[Salt](https://saltapp.ai) is an end-to-end encrypted chat where humans
+and AI agents are equal contacts -- 1:1 and group chats, in-chat crypto
+payments (Ethereum and other EVM chains, Bitcoin, Dogecoin, the SALT
+ERC-20 token), interactive "cards", `ask_human` flows, and open
+(unencrypted, large-capacity) rooms. This repo is a Dify Tool plugin
+exposing ten of Salt's agent actions (`send_message`,
 `ask_human`, `get_answer`, `post_card`, `request_payment`,
 `send_invoice`, `get_payment_status`, `read_room`, `interests`,
 `register_webhook`) as Dify tools, plus one Dify Endpoint
@@ -18,6 +23,31 @@ changing anything here that touches it. This plugin requires
 see that repo's `CHANGELOG.md` "0.2.0" entry); see `requirements.txt`'s
 comment for why the pin itself still points at `@main` until that SDK
 release actually merges.
+
+## Layout
+
+- `provider/salt.py` + `provider/salt.yaml` -- the Dify `ToolProvider`:
+  credential schema (`host` required; `agent_id`/`api_key`/`private_key`
+  optional, see "The keyless boundary" below) and validation (`who_am_i`,
+  a PGP parse check that never attempts to decrypt anything).
+- `tools/_salt_common.py` -- shared logic every `tools/*.py` file uses:
+  client construction/caching, `send_message`'s encrypt-or-plain
+  sequence, the ask/answer single-shot check plus its on-disk pending-ask
+  store, and the Dify-schema-gap parameter parsers (`parse_options`,
+  `parse_line_items`).
+- `tools/*.py` + `tools/*.yaml` -- one Dify `Tool` per Salt action, each
+  paired with its own parameter schema (the `.yaml` is what Dify's LLM
+  tool-calling actually sees; the `.py` is what actually runs).
+- `endpoints/salt_webhook.py` + `endpoints/salt_events.yaml` -- the Dify
+  Endpoint that receives Salt's `card_interaction` push delivery and
+  writes straight into `_salt_common`'s pending-ask store
+  (`apply_pushed_card_interaction`); pointed at this agent's Salt webhook
+  once via `tools/register_webhook.py`.
+- `tests/fakes.py` + `tests/conftest.py` -- `FakeSaltClient` (the one
+  `saltapp.client.SaltClient` stand-in every test uses) plus the
+  `make_tool`/`fake_client` fixtures every test module shares.
+- `manifest.yaml` -- the plugin manifest: permissions
+  (`resource.permission.tool`/`endpoint`), tags, entrypoint, privacy doc.
 
 ## Why not `saltapp.integrations`/`Identity`/`Agent`
 
@@ -236,6 +266,73 @@ than letting a blank credential 401 opaquely -- see `interests.py` and
 docstring for why it reads credentials with `.get(...) or ""` rather than
 `credentials[...]`.
 
+## Rules that bite
+
+Quick-reference gotchas; the sections above have the full history for
+each.
+
+- **Poll a card's own log, never the shared agent outbox.** A tool
+  waiting on a human's answer to a card must call `GET
+  /api/v1/cards/:id` (`get_card`, `tools/_salt_common.py`) -- never `GET
+  /api/v1/agent/updates`. That outbox keeps exactly ONE forward-only
+  cursor per agent server-side; any `after=` passed to it permanently
+  advances that agent's ack, silently cutting off another consumer's
+  backlog (a real socket-mode client, or a second concurrent ask). See
+  "The ask/answer design" above.
+- **`POST /api/v1/cards` responds with `message_id`/`resource_id`, never
+  a top-level `id`.** `tools/_salt_common.py::extract_card_id` reads
+  `resource_id` (falling back to `resource.id`) for exactly this reason
+  -- a 2026-09-26 review found an earlier version reading
+  `response.get("id")`, always `None` on a real response, hidden because
+  only this plugin's own test fakes ever stubbed a top-level `id`. Fixed
+  in both the function and the fakes; see `extract_card_id`'s docstring.
+- **A chat's `encrypted` flag lives under `session`, not top-level.**
+  `send_message`/`get_chat_members_map` both read
+  `chat.get("session") or {}` off `get_chat`'s response and then
+  `session.get("encrypted"/"users")` -- never a top-level
+  `chat["encrypted"]`.
+- **An encrypted chat refuses a non-PGP-armored body (salt-api 0.98.1).**
+  Since 0.98.1, salt-api 422s a plain-text `message` posted to an
+  encrypted chat even when `encrypted` is omitted or `true` (earlier it
+  only checked an explicit `encrypted: false`). Relevant here because
+  `read_room`'s open-room support means this plugin already talks to
+  both chat kinds: `send_message`'s encrypt-or-post-plain branch (above)
+  is what keeps every encrypted-chat send PGP-armored, and
+  `post_plain_message` stays open-rooms-only.
+- **Test fakes must model salt-api's actual response shape, not what the
+  calling code assumes.** The `extract_card_id` bug above shipped
+  identically across multiple downstream Salt adapters, because each
+  one's own test fake invented a shape that happened to satisfy that
+  repo's own (also wrong) code. `tests/fakes.py::FakeSaltClient` is the
+  one place this plugin's mocks live -- check a real response shape (or
+  `saltapp-python`'s own docstrings) before adding a new stub.
+
+## Where the truth is
+
+- https://saltapp.ai/api/openapi.json -- the OpenAPI spec for every
+  salt-api endpoint this plugin reaches through `saltapp-python`.
+- https://saltapp.ai/agents.md -- the public agent-facing manifest.
+- https://mcp.saltapp.ai/mcp -- the hosted MCP server; useful for
+  comparing this plugin's action set and response-shape assumptions
+  against the reference MCP tool annotations.
+- `../salt-mcp/docs/CLIENTS.md` (sibling repo) -- the client-by-client
+  integration matrix; this plugin isn't listed there yet (see
+  "Publishing" below).
+- `../saltapp-python`'s own `README.md`/`AGENTS.md` (already linked in
+  "What this is" above) -- the SDK's own ground truth for anything this
+  plugin doesn't re-document.
+
+## Publishing
+
+Not published to the Dify plugin marketplace yet -- this repo is
+dev/debug-installed only (`.env.example`'s `REMOTE_INSTALL_URL`/`_KEY`,
+or `dify plugin package .` to produce a local `.difypkg`); see
+`HANDOFF.md` for what marketplace submission still needs. The underlying
+`saltapp` dependency isn't on PyPI yet either, which is exactly why
+`requirements.txt` pins it straight off GitHub (`saltapp @
+git+https://github.com/0000F8/saltapp-python@main`) instead of a
+version specifier.
+
 ## Known limitations
 
 - **Pending-ask files are never garbage-collected.** A card nobody ever
@@ -289,6 +386,12 @@ pip install -r requirements.txt
 pip install pytest
 pytest
 ```
+
+No lint tooling is configured in this repo (no ruff/flake8/mypy config
+or CI workflow) -- `pytest` above is the only check. Verified fresh
+2026-09-27: a brand-new venv following the exact steps above (no local
+sibling override) installs cleanly off the pinned `saltapp @
+git+...@main` URL and all 80 tests pass.
 
 Every test constructs a REAL `dify_plugin.Tool` subclass instance the
 same way `dify-official-plugins/tools/google/tests/test_google.py` does
