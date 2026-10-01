@@ -335,14 +335,15 @@ version specifier.
 
 ## Known limitations
 
-- **Pending-ask files are never garbage-collected.** A card nobody ever
-  taps (the human left, the chat was archived, the agent's flow was
-  abandoned) leaves its JSON file under `~/.salt/dify-plugin/asks/`
-  forever. This is a real gap, not an oversight rationalized away: fixing
-  it would need either a TTL sweep on `ask_human`/`get_answer` invocation
-  (cheap, but only prunes on the next call, not proactively) or a
-  separate cron-like mechanism Dify plugins don't have a first-class way
-  to run. Left undone here; a future pass should add at least the sweep.
+- **Pending-ask files are swept, not cron-collected.** A card nobody
+  ever taps leaves its JSON file under `~/.salt/dify-plugin/asks/` until
+  `gc_stale_pending_asks` (`tools/_salt_common.py`, `STALE_ASK_MAX_AGE_SECONDS`
+  = 24 h by mtime) removes it -- and that sweep runs only from
+  `save_pending_ask`, i.e. on the next ask written by any process on the
+  machine, never proactively, because Dify plugins have no first-class
+  cron. An idle plugin keeps its last stale files until it is used again.
+  `PRIVACY.md`'s retention section states this same rule; keep the two in
+  step.
 - **The module-level `_client_cache` is per-process, not shared across
   Dify's worker processes**, unlike the pending-ask file store. Each
   process opens its own `SaltClient`/httpx connection pool per host
