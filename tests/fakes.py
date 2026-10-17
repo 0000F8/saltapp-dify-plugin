@@ -63,9 +63,9 @@ class FakeSaltClient:
     def get_chat_members(self, api_key: str, chat_id: str) -> list[dict[str, Any]]:
         return self._record("get_chat_members", api_key=api_key, chat_id=chat_id)
 
-    def post_message(self, api_key: str, chat_id: str, message: str, sender_message: str | None = None, **_: Any) -> dict[str, Any]:
+    def post_message(self, api_key: str, chat_id: str, message: str, sender_message: str | None = None, **kwargs: Any) -> dict[str, Any]:
         return self._record(
-            "post_message", api_key=api_key, chat_id=chat_id, message=message, sender_message=sender_message,
+            "post_message", api_key=api_key, chat_id=chat_id, message=message, sender_message=sender_message, **kwargs,
         )
 
     def post_plain_message(self, api_key: str, chat_id: str, message: str, **kwargs: Any) -> dict[str, Any]:

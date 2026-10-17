@@ -140,17 +140,11 @@ def send_message(client: SaltClient, api_key: str, agent_id: str, chat_id: str, 
     if members is None:
         members = client.get_chat_members(api_key, chat_id)
     self_id = agent_id.lower()
-    recipient_keys: list[str] = []
     self_public_key: str | None = None
     for member in members:
-        member_id = str(member.get("id", "")).lower()
-        public_key = member.get("public_key")
-        if member_id == self_id:
-            if public_key:
-                self_public_key = public_key
-            continue
-        if public_key:
-            recipient_keys.append(public_key)
+        if member.get("public_key") and str(member.get("id", "")).lower() == self_id:
+            self_public_key = member["public_key"]
+    recipient_keys, prints = _send_targets(members, self_id)
 
     if not recipient_keys:
         raise SaltApiError(
@@ -160,12 +154,41 @@ def send_message(client: SaltClient, api_key: str, agent_id: str, chat_id: str, 
 
     encrypted = crypto.encrypt_for(text, recipient_keys)
     sender_message: str | None = None
+    sender_print: str | None = None
     if self_public_key:
         try:
             sender_message = crypto.encrypt_for(text, [self_public_key])
+            sender_print = crypto.fingerprint_of(self_public_key).upper() if prints else None
         except Exception:  # noqa: BLE001 -- best-effort only, see docstring
             sender_message = None
-    return client.post_message(api_key, chat_id, encrypted, sender_message)
+            sender_print = None
+    try:
+        return client.post_message(
+            api_key, chat_id, encrypted, sender_message,
+            recipient_fingerprints=prints, sender_fingerprint=sender_print,
+        )
+    except SaltApiError as err:
+        # A member reset their chat key since we read the members: the 409 carries the current ones.
+        # Encrypt to those and send ONCE more; a second refusal propagates (no loop).
+        fresh = err.body.get("members") if err.status == 409 and isinstance(err.body, dict) and err.body.get("code") == "stale_recipient_keys" else None
+        if not isinstance(fresh, list):
+            raise
+        recipient_keys, prints = _send_targets(fresh, self_id)
+        if not recipient_keys:
+            raise
+        return client.post_message(
+            api_key, chat_id, crypto.encrypt_for(text, recipient_keys), sender_message,
+            recipient_fingerprints=prints, sender_fingerprint=sender_print if prints else None,
+        )
+
+
+def _send_targets(members: list[dict[str, Any]], self_id: str) -> tuple[list[str], dict[str, str] | None]:
+    """The other members' public keys plus the send guard's `recipient_fingerprints` (user id -> the
+    fingerprint of the key we encrypt to). The fingerprints are None unless EVERY recipient carries
+    one: a partial map would count the missing members as stale."""
+    others = [m for m in members if m.get("public_key") and str(m.get("id", "")).lower() != self_id]
+    prints = {str(m["id"]): str(m["public_fingerprint"]).upper() for m in others if m.get("public_fingerprint")}
+    return [m["public_key"] for m in others], (prints if others and len(prints) == len(others) else None)
 
 
 def humans_by_id(members: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
