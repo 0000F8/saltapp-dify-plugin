@@ -20,6 +20,8 @@ domain saltapp.ai, and the financial-activity review (payment request and
 invoice tools; reviewers decide). Not done: install test on Dify Community
 Edition and Dify Cloud (the PR says so).
 
+PR opened: https://github.com/langgenius/dify-plugins/pull/3420 (fork 0000F8/dify-plugins, branch add-0000f8-salt, file 0000F8/salt/salt-0.1.2.difypkg, risk High because of payment tools). Check it for bot results and reviewer comments; updates are a new .difypkg with a bumped version.
+
 The feat/send-guard branch (1e3851f) is a separate lane and is not in 0.1.2.
 
 ## 2026-09-26 ask_human/get_answer poll the card, not the shared agent outbox (lane/card-poll)
