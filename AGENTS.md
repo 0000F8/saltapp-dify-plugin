@@ -324,14 +324,10 @@ each.
 
 ## Publishing
 
-Not published to the Dify plugin marketplace yet -- this repo is
-dev/debug-installed only (`.env.example`'s `REMOTE_INSTALL_URL`/`_KEY`,
-or `dify plugin package .` to produce a local `.difypkg`); see
-`HANDOFF.md` for what marketplace submission still needs. The underlying
-`saltapp` dependency isn't on PyPI yet either, which is exactly why
-`requirements.txt` pins it straight off GitHub (`saltapp @
-git+https://github.com/0000F8/saltapp-python@main`) instead of a
-version specifier.
+Listing submitted to `langgenius/dify-plugins` (see `HANDOFF.md`, 2026-10-19).
+`dify plugin package .` builds the `.difypkg`; `.difyignore` keeps tests and
+docs out of it. `requirements.txt` pins `saltapp` from PyPI
+(`>=0.16.0,<0.17.0`), not from git.
 
 ## Known limitations
 

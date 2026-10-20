@@ -175,3 +175,12 @@ Thumbs.db
 # Dify plugin packages
 #  To prevent packaging repetitively
 *.difypkg
+
+# Not needed at runtime (marketplace package rules)
+tests/
+HANDOFF.md
+AGENTS.md
+.env.example
+.python-version
+.pytest_cache/
+.git

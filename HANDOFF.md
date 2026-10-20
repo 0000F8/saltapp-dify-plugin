@@ -1,5 +1,27 @@
 # HANDOFF
 
+## 2026-10-19 Dify Marketplace listing (feat/marketplace-listing)
+
+Prepared the listing for `langgenius/dify-plugins`. No prior PR or issue from
+0000F8 existed there (`gh pr list/issue list --author 0000F8 --state all`: none).
+
+Changes: `requirements.txt` now pins `saltapp>=0.16.0,<0.17.0` from PyPI (the
+marketplace rules discourage git installs; PyPI latest is 0.16.0, not 0.15.0);
+`manifest.yaml` 0.1.2 with the required `repo` and `contact` fields;
+`.difyignore` keeps tests, HANDOFF.md, AGENTS.md, `.env.example` and `.git`
+out of the package; README/AGENTS point at the public source repo.
+
+Validated: 80 tests pass against PyPI saltapp 0.16.0; `dify plugin package .`
+builds `salt-0.1.2.difypkg`; langgenius/dify-marketplace-toolkit
+`validate-difypkg.py` passes every blocking check (contents, secrets, binaries,
+manifest, readme, dependencies, compile) given a full PR body. Warnings left:
+no `meta.minimum_dify_version` (not tested on a Dify version), undeclared
+domain saltapp.ai, and the financial-activity review (payment request and
+invoice tools; reviewers decide). Not done: install test on Dify Community
+Edition and Dify Cloud (the PR says so).
+
+The feat/send-guard branch (1e3851f) is a separate lane and is not in 0.1.2.
+
 ## 2026-09-26 ask_human/get_answer poll the card, not the shared agent outbox (lane/card-poll)
 
 Branch `lane/card-poll`. Cross-repo bug: this plugin's `ask_human`/

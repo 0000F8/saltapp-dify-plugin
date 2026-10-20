@@ -1,9 +1,11 @@
-version: 0.1.1
+version: 0.1.2
 type: plugin
 author: "0x0000f8"
 name: salt
 label:
   en_US: Salt
+repo: https://github.com/0000F8/saltapp-dify-plugin
+contact: 0000F8@proton.me
 created_at: "2026-09-18T00:00:00Z"
 icon: icon.svg
 description:

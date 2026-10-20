@@ -237,9 +237,8 @@ pip install pytest
 pytest
 ```
 
-This plugin requires `saltapp>=0.2.0` (see `requirements.txt`'s comment);
-until that release is actually published, install the local sibling
-checkout in editable mode instead of the pinned git URL:
+This plugin requires `saltapp>=0.16.0,<0.17.0` from PyPI (see `requirements.txt`);
+to test against a local SDK checkout instead, run
 `.venv/bin/pip install -e ../saltapp-python`.
 
 Tests mock `saltapp.client.SaltClient` only -- they never hit a real
@@ -266,5 +265,4 @@ against a real Salt account.
 
 Author: 0x0000F8 (0000F8@proton.me). Homepage: https://saltapp.ai. Built
 on [`saltapp`](https://github.com/0000F8/saltapp-python). This plugin's
-own source is not yet published to a public repository -- see
-`HANDOFF.md` for what marketplace submission still needs.
+source: https://github.com/0000F8/saltapp-dify-plugin
